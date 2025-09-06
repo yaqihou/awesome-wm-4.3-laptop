@@ -88,12 +88,16 @@ M.getNextWallpaperByRatio = function(desiredRatio)
       targetIdx = M.landscapeIdx
    end
    
-   -- If we've reached the end of this list, try to populate more
-   if targetIdx > #targetList and M.unprocessedCount > 0 then
+   -- Multi-batch search: try multiple batches before giving up
+   local maxSearchAttempts = M.maxSearchAttempts or 5
+   local searchAttempts = 0
+   
+   while targetIdx > #targetList and M.unprocessedCount > 0 and searchAttempts < maxSearchAttempts do
       M.populateRatioCaches(10)
+      searchAttempts = searchAttempts + 1
    end
    
-   -- If still no wallpapers available, fall back to the other ratio
+   -- If still no wallpapers available after multi-batch search, fall back to the other ratio
    if targetIdx > #targetList then
       if desiredRatio == "portrait" and #M.landscapeList > 0 then
          targetList = M.landscapeList
@@ -133,6 +137,7 @@ M.init = function()
    M.landscapeIdx = 1       -- Current index for landscape wallpapers
    M.processedIdx = 1       -- Index of next unprocessed wallpaper in raw filelist
    M.unprocessedCount = 0   -- Number of unprocessed wallpapers remaining
+   M.maxSearchAttempts = 5  -- Maximum batches to search before falling back to other orientation
 
    M.showDesktopStatus = false
    M.showDesktopBuffer = {}
@@ -661,6 +666,7 @@ M.toggleGallery = function(idx, overrideCMD)
    M.wallpaperMode = beautiful.wallpaper[idx].mode
    M.quiteMode     = beautiful.wallpaper[idx].quite or false
    M.ratioBasedSelection = beautiful.wallpaper[idx].ratioBasedSelection or false
+   M.maxSearchAttempts = beautiful.wallpaper[idx].maxSearchAttempts or 5
    -- M.shuffleMode   = beautiful.wallpaper[idx].shuffle or false
 
    M.filelistCMD   = beautiful.wallpaper[idx].cmd or nil
