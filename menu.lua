@@ -65,6 +65,9 @@ local scriptmenu = awful.menu{
    },
    { "Toggle tg download [all icons]",
      "/home/yaqi/.local/bin/maux-toggle-tg-download 1"
+   },
+   { "Toggle tg download [all icons] - Confirm",
+     "/home/yaqi/.local/bin/maux-toggle-tg-download 2"
    }
 }
 
@@ -81,7 +84,7 @@ local mainmenu = awful.menu{
    auto_expand = true
 }
 
-local myScreenIdx, myScreenIdxReverse = myutils.updateScreenList()
+local myScreenSymbol2Idx, myScreenIdx2Symbol = myutils.updateScreenList()
 local app_menu = function(appClass, newCmd)
    local items = {}
    local minimizedStatus = ""
@@ -96,8 +99,8 @@ local app_menu = function(appClass, newCmd)
          end
 
         header = string.format(
-            "%s[S%d-%d] %s",
-            minimized, myScreenIdxReverse[c.screen.index], c.first_tag.index, c.name)
+            "%s[%s-%d] %s",
+            minimized, string.upper(myScreenIdx2Symbol[c.screen.index]), c.first_tag.index, c.name)
 
          items[#items+1] =
             {header, function()

@@ -5,6 +5,8 @@ local naughty       = require("naughty")
 
 local M = {}
 
+
+
 M.reportMonitor = function (s)
    title = string.format("Monitor %s", s.index)
    monitorProps = string.format(
@@ -23,41 +25,45 @@ M.updateFocusWidget = function()
 end
 
 
+local getMyScreenSymbol = function(s)
+   local x = s.geometry.x
+   local y = s.geometry.y
+
+   -- Translated Letter, i.e. after Colemak mapping
+   if x == 0 then return 'a' end
+   if x == 1080 then
+      return 'r' -- Main 32
+   end
+
+   if x == 1720 then
+	  return 'w' -- Top 32 (TV)
+   end  
+
+   if x == 3640 then
+      if y >= 1080 then
+         return 's' --Bot 27
+      else
+         return 'f' -- Top 27
+      end  
+   end
+
+   return "#" .. tostring(s.index)
+end
+
 M.updateScreenList = function () 
-   -- translate the physical index to build in index
-   local myScreenIdx = {}
-   -- translate built-in index to physical index
-   local myScreenIdxReverse = {}
-
-   local idxTable = {}
-   local sortTable = {}
-   for s in screen do
-      sortTable[#sortTable+1] = s.geometry.x
-      idxTable[s.geometry.x] = s.index
-   end
-   table.sort(sortTable)
-   for k, v in pairs(sortTable) do
-     myScreenIdx[k] = idxTable[v]
-     myScreenIdxReverse[idxTable[v]] = k
-   end
-
-   -- Fill in the rest of monitors in case
-   for k = #myScreenIdx + 1, 9 do
-     myScreenIdx[k] = k
-     myScreenIdxReverse[k] = k
-   end
+   
+   -- translate the my index to built-in index
+   local myScreenSymbol2Idx = {}
+   -- translate built-in index to my index
+   local myScreenIdx2Symbol = {}
 
    for s in screen do
-      M.reportMonitor(s)
+      local screenSymbol = getMyScreenSymbol(s)
+      myScreenSymbol2Idx[screenSymbol] = s.index
+      myScreenIdx2Symbol[s.index] = screenSymbol
    end
 
-   for k, v in pairs(myScreenIdx) do
-      monitorProps = string.format(
-         "%d: %d",
-         k, v)
-   end
-
-   return myScreenIdx, myScreenIdxReverse
+   return myScreenSymbol2Idx, myScreenIdx2Symbol
    
 end
 

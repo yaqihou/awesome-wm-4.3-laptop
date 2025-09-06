@@ -20,6 +20,7 @@ local string  = string
 local os      = os
 
 local volumeWidget = require('awesome-wm-widgets.volume-widget.volume')
+-- local vpnWidget = require('widgets.vpn')
 
 local theme   = {}
 
@@ -31,14 +32,24 @@ theme.icon_dir    = os.getenv("HOME") .. "/.config/awesome/themes/icons"
 theme.wallpaper = {
    {
       name="Normal",
+	  galleryType='folder',
       path=os.getenv("HOME") .. "/Pictures/wallpaper/",
       mode="max", quite=true, interval=600
    },
    {
       name="Adult",
+	  galleryType='filelist',
       path=os.getenv("HOME") .. "/Pictures/wallpaper-adult/",
       mode="max", quite=true, interval=90,
       cmd="shuf " .. os.getenv("HOME") .. "/Pictures/wallpaper-adult-filelist > /tmp/wall-list"
+   },
+   {
+      name="Custom",
+      path='@combine',
+	  galleryType='filelist',
+      mode="max", quite=true, interval=90,
+      cmd="shuf " .. os.getenv("HOME") .. "/Pictures/custom-wallpaper-filelist > /tmp/wall-list",
+      cmd_portrait="shuf " .. os.getenv("HOME") .. "/Pictures/custom-wallpaper-portrait-filelist > /tmp/wall-list",
    },
 }
 
@@ -67,7 +78,7 @@ theme.border_focus  = "#4FAAD6"
 theme.taglist_fg_focus = "#4FAAD6"
 theme.taglist_bg_focus = theme.bg_focus
 theme.taglist_fg_empty = "#505050"
-theme.taglist_font     = "NumbersIndicia 12"
+theme.taglist_font     = "Noto Sans Display SemiBold 12"
 
 theme.tasklist_fg_focus     = "#4FAAD6"
 theme.tasklist_bg_focus     = "#505050" .. "CC" -- brighter
@@ -255,47 +266,45 @@ end
 -----------------------------------------------------------------------------
 
 -- VPN Indicator
-local vpntextwidget = nil
-local vpnOffMarkup = space2
-   .. markup.font(theme.monofont, "VPN " .. markup(my_lightgray, "OFF")) .. space2
+local vpnOffMarkup = markup.font(theme.monofont, "VPN " .. markup(my_lightgray, "OFF"))
 
 local vpntext = wibox.widget.textbox(vpnOffMarkup)
-vpntextwidget = wibox.container.background(
-   vpntext, theme.bg_focus, widgetBackgroundShape)
-vpntextwidget = wibox.container.margin(vpntextwidget, 0, 0, 5, 5)
-local openvpn_status_old = nil
+local vpntextwidget = wibox.container.margin(
+   wibox.container.background(vpntext, theme.bg_focus, widgetBackgroundShape),
+   0, 0, 5, 5)
 
-theme.update_vpn_widget = function(force_flg)
+theme.update_vpn_widget = function()
    awful.spawn.easy_async_with_shell(
       "nordvpn status",
       function(out, err, reason, code)
          -- only update when forced or the status changed
-         -- if force_flg == true or openvpn_status_old ~= openvpn_is_running then
-         --    if openvpn_is_running then -- connected
-         --       awful.spawn.easy_async_with_shell(
-         --          "curl -s https://freegeoip.app/csv/$(curl -s ifconfig.co -4)" ..
-         --          " | awk -F ',' '{print $6 \", \" $2 \"@\" $1 }'",
-         --          function(out)
-         --             -- local location = out:gsub("@.*$", "")
-         --             -- local ip_addr = out:gsub("^[^@]*@", "")
-                     
-         --             local text = space2 .. markup.font(theme.monofont, "VPN " .. markup(my_green, out) .. "  ") .. space2
-         --             vpntext:set_markup(text)
-         --          end
-         --       )
-         --    else
-         --       vpntext:set_markup(vpnOffMarkup)
-         --    end
-         -- end
+         local status = out:match("Status: (%a+)\n") 
+
+         if status == "Connected" then -- connected
+            local city = out:match("City: (%a+)\n") 
+            local text = markup.font(theme.monofont, "VPN " .. markup(my_green, "ON @ " .. city)) 
+            vpntext:set_markup(space2 .. text .. space2)
+         else
+            vpntext:set_markup(space2 .. vpnOffMarkup .. space2)
+         end
    end)
 end
 
 local vpnwidget_timer = gears.timer {
    timeout = 10,
    call_now = true,
-   autostart = false,
+   autostart = true,
    callback = function() theme.update_vpn_widget() end}
-vpnwidget_timer:start()
+
+
+vpntextwidget:connect_signal(
+   "mouse::enter",
+   function()
+      theme.update_vpn_widget()
+      -- TODO move it to widgets folder and add notifications
+   end
+)
+
 
 -- Clock
 local mytextclock = wibox.widget.textclock(
@@ -658,7 +667,7 @@ function theme.at_screen_connect(s)
     end
 
    -- Quake application
-   s.quake = lain.util.quake({ app = "xterm", height = 0.35 })
+   -- s.quake = lain.util.quake({ app = "xterm", height = 0.35 })
    
    -- Tags
    awful.tag(awful.util.tagnames, s, defaultLayout)

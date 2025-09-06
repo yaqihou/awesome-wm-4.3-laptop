@@ -109,6 +109,14 @@ local basicKeybindings = awful.util.table.join(
       { altkey, "Control", "Shift" }, "r",
       function () lain.util.rename_tag() end,
       {description = "rename tag", group = "tag"}),
+   awful.key(
+      { altkey, "Control", "Shift" }, "Left",
+      function () lain.util.move_tag(-1) end,
+      {description = "move tag to left", group = "tag"}),
+   awful.key(
+      { altkey, "Control", "Shift" }, "Right",
+      function () lain.util.move_tag(1) end,
+      {description = "add new tag", group = "tag"}),
    
    -- layout adjustment
    awful.key(
@@ -176,7 +184,7 @@ local basicKeybindings = awful.util.table.join(
       {description = "select previous", group = "layout"}),
    -- Show/Hide Wibox
    awful.key(
-      { modkey }, "b",
+      { modkey, "Shift" }, "b",
       function ()
          for s in screen do
             s.mywibox.visible = not s.mywibox.visible
@@ -184,6 +192,16 @@ local basicKeybindings = awful.util.table.join(
                s.mybottomwibox.visible = not s.mybottomwibox.visible
             end
          end
+      end,
+      {description = "toggle wibox (all)", group = "awesome"}),
+   awful.key(
+      { modkey }, "b",
+      function ()
+         local s = awful.screen.focused()
+        s.mywibox.visible = not s.mywibox.visible
+        if s.mybottomwibox then
+            s.mybottomwibox.visible = not s.mybottomwibox.visible
+        end
       end,
       {description = "toggle wibox", group = "awesome"}),
    
@@ -293,14 +311,36 @@ local fnKeybindings  = awful.util.table.join(
       end,
       {description = "volume 100%", group = "hotkeys"})
 )
+-- Add mapping to function keys
+-- for i = 1, 10 do
+--    fnKeybindings = awful.util.table.join(
+--       fnKeybindings,
+--       awful.key({ altkey, "Shift" }, "#" .. i + 9,
+--          function() awful.spawn.with_shell('DISPLAY=:1 xdotool key --clearmodifiers F' .. i) end
+--       )
+--    )
+-- end
+-- fnKeybindings = awful.util.table.join(
+--    fnKeybindings,
+--    awful.key({ altkey, "Shift" }, "-",
+--       function() awful.spawn.with_shell('DISPLAY=:1 xdotool key --clearmodifiers F11') end
+--    ),
+--    awful.key({ altkey, "Shift" }, "=",
+--       function() awful.spawn.with_shell('DISPLAY=:1 xdotool key --clearmodifiers F12') end
+--    )
+-- )
 
 local appKeybindings = awful.util.table.join(
    -- Take a screenshot
    -- https://github.com/lcpz/dots/blob/master/bin/screenshot 
    awful.key(
-      { altkey, "Shift", "Control" }, "4",
-      function() awful.spawn("scrot -s") end,
-      {description = "take a screenshot", group = "Apps"}),
+      { modkey, "Shift" }, "s",
+      function ()
+         awful.spawn.with_shell(
+			"scrot -s -F - | xclip -selection clipboard -t image/png"
+		 )
+      end,
+      {description = "Take a screenshot", group = "Apps"}),
    -- Standard program
    awful.key(
       { modkey,           }, "Return",
@@ -337,7 +377,6 @@ local appKeybindings = awful.util.table.join(
        { modkey }, "a",
        function () awful.spawn("/home/yaqi/.emacs_anywhere/bin/run") end,
        {description = "Call emacs-anywhere", group="Apps"}),
-
     awful.key(
        { modkey, "Control"  }, "s", function() awful.spawn("fsearch") end,
        {description = "fsearch", group ="Apps"}),
@@ -346,10 +385,13 @@ local appKeybindings = awful.util.table.join(
        { modkey, "Control"  }, "r", function() awful.spawn("rofi -show run") end,
        {description = "rofi run", group ="Apps"}),
     awful.key(
+       { modkey, "Control"  }, "a", function() awful.spawn("rofi -show drun") end,
+       {description = "rofi run", group ="Apps"}),
+    awful.key(
        { modkey, "Control"  }, "w", function() awful.spawn("rofi -show window") end,
        {description = "rofi window", group ="Apps"}),
     awful.key(
-       { modkey, "Control"  }, "f", function() awful.spawn("rofi -show drun") end,
+       { modkey, "Control"  }, "f", function() awful.spawn("rofi -show filebrowser") end,
        {description = "rofi drun", group ="Apps"})
     -- awful.key(
     --    { modkey, "Control"  }, "s", function() awful.spawn("rofi -show ssh") end,
@@ -369,18 +411,15 @@ local appKeybindings = awful.util.table.join(
 	--    {description = "Toggle Play of Cmus", group = "hotkeys"}),
 )
 
-M.getGlobalkeys = function(myScreenIdx)
+M.getGlobalkeys = function()
 
-   local myScreenIdx = myScreenIdx or nil
-   if myScreenIdx == nil then
-      myScreenIdx, _ = myutils.updateScreenList()
-   end
+   myScreenSymbol2Idx, _ = myutils.updateScreenList()
    
    -- {{{ Key bindings
    local globalkeys = awful.util.table.join(
       -- Hotkeys
       awful.key(
-         { modkey,  "Control" }, "h",
+         { modkey,           }, "/",
          hotkeys_popup.show_help,
          {description = "show help", group="awesome"}),
       -------------
@@ -389,16 +428,16 @@ M.getGlobalkeys = function(myScreenIdx)
          function () awful.client.getmaster():jump_to() end,
          {description = "jump to master client", group = "Apps"}),
       -------------
-      awful.key(
-         { modkey, "Control", "Shift" }, "r", awesome.restart,
-         {description = "reload awesome", group = "awesome"}),
+      -- awful.key(
+      --    { modkey, "Control", "Shift" }, "r", awesome.restart,
+      --    {description = "reload awesome", group = "awesome"}),
       -- On the fly useless gaps change
       awful.key(
-         { altkey, "Control" }, "=",
+         { altkey, "Control" }, "[",
          function () lain.util.useless_gaps_resize(5) end,
          {description = "increment useless gaps", group = "tag"}),
       awful.key(
-         { altkey, "Control" }, "-",
+         { altkey, "Control" }, "]",
          function () lain.util.useless_gaps_resize(-5) end,
          {description = "decrement useless gaps", group = "tag"}),
     ------------------
@@ -425,27 +464,38 @@ M.getGlobalkeys = function(myScreenIdx)
    globalkeys = awful.util.table.join(globalkeys, appKeybindings)
    -- Custom Screen Focus Movement
 
-   for i, v in pairs(myScreenIdx) do
-      local descr_view, descr_move
-      if i == 1 or i == screen:count() then
-         descr_view = {description = "view screen #", group = "screen"}
-         descr_move = {description = "move focused client to screen #", group = "screen"}
-      end
+   for symbol, idx in pairs(myScreenSymbol2Idx) do
+      -- local descr_view, descr_move
+      -- if i == 1 or i == screen:count() then
+      --    descr_view = {description = "view screen #", group = "screen"}
+      --    descr_move = {description = "move focused client to screen #, focus moved with client", group = "screen"}
+      --    descr_move_stay = {description = "move focused client to screen #, focus stayed unchanged", group = "screen"}
+      -- end
+	  local descr_view = {description = "view screen", group = "screen"}
+      local descr_move = {description = "move focused client to screen", group = "screen"}
 
       globalkeys = awful.util.table.join(
          globalkeys,
-         -- View tag only.
-         awful.key({ hyperkey }, "#" .. i + 9,
+         awful.key({ hyperkey, }, symbol,
             function ()
-               awful.screen.focus(v)
+               awful.screen.focus(idx)
                myutils.updateFocusWidget()
             end,
             descr_view),
-         -- Toggle tag display.
-         awful.key({ hyperkey, altkey }, "#" .. i + 9,
+         awful.key({ hyperkey, altkey }, symbol,
             function ()
                if client.focus ~= nil then
-                  client.focus:move_to_screen(v)
+                  client.focus:move_to_screen(idx)
+                  myutils.updateFocusWidget()
+               end
+            end,
+            descr_move),
+         awful.key({ hyperkey, altkey, "Shift" }, symbol,
+            function ()
+               if client.focus ~= nil then
+                  local srcScreen = awful.screen.focused()
+                  client.focus:move_to_screen(idx)
+                  awful.screen.focus(srcScreen)
                end
             end,
             descr_move)
@@ -541,11 +591,11 @@ M.getClientkeys = function()
    local clientkeys = awful.util.table.join(
       -- Opacity contrlo
       awful.key(
-         { altkey, "Shift" }, "=",
+         { modkey, "Shift" }, "]",
          function (c) opacity_adjust(c,  0.01) end,
          {description = "Fine Increase Client Opacity", group = "client"}),
       awful.key(
-         { altkey, "Shift" }, "-",
+         { modkey, "Shift" }, "[",
          function (c) opacity_adjust(c, -0.01) end,
          {description = "Fine Decrease Client Opacity", group = "client"}),
       -- awful.key(
@@ -558,7 +608,7 @@ M.getClientkeys = function()
       --    {description = "Decrease Client Opacity", group = "client"}),
       
       -- Size Control
-      awful.key({ altkey, "Shift"   }, "m", lain.util.magnify_client,
+      awful.key({ modkey, "Shift"   }, "m", lain.util.magnify_client,
          {description = "magnify client", group = "client"}),
       awful.key(
          { modkey,           }, "f",

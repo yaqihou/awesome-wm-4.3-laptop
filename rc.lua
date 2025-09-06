@@ -228,8 +228,15 @@ awful.rules.rules = {
     -- { rule = { class = "Firefox" },
     --   properties = { screen = 1, tag = awful.util.tagnames[1] } },
 
-    { rule_any = { class = {"Emacs"} },
+    { rule = { class = "Emacs" },
       properties = { opacity = 0.95 }},
+
+    { rule = { class = "Google-chrome", role = "pop-up" },
+      properties = { floating=true },
+      callback = function(c)
+         c:geometry({width=800, height=600})
+      end
+    },
 
     { rule_any = { class = {"Google-chrome", "Nautilus"} },
       properties = { opacity = 0.98 }},
@@ -242,9 +249,9 @@ awful.rules.rules = {
                     requests_no_titlebar = true}},
 
 	-- Set floating clients
-    { rule_any = { class = {"feh", "Mathematica", "mpv", "vlc",
-                            "libprs500", "Nautilus", "Envince",
-                            "onscripter", "matplotlib",
+    { rule_any = { class = {"feh", "Mathematica", 
+                            "libprs500", "Envince",
+                            "onscripter", "matplotlib", "steam_proton",
                             "Eog", "Matplotlib", "org.jabref.gui.JabRefMain",
                             "MEGAsync"} },
       properties = { floating = true } },
@@ -254,12 +261,26 @@ awful.rules.rules = {
       properties = { ontop = true } },
 
 	-- Set center clients
-	{ rule_any = {class = {"feh", "vlc", "mpv", "libprs500",
+	{ rule_any = {class = {"feh", "libprs500",
                            "onscripter", "Steam", "stretchly", "Eog" }},
 	  callback = function(c)
 		 awful.placement.centered(c)
 	  end
 	},
+    { rule = { name = "TelegramDesktop"},
+      callback = function(c)
+         local keys = c:keys()
+         c:keys(awful.util.table.join(
+                   keys,
+                   awful.key(
+                      { }, "Control_R",
+                      function ()
+                         awful.spawn("xdotool mousemove 3534 1420 click 1 mousemove restore mousemove 3590 624 click 1 mousemove restore")
+                      end,
+                      {description = "Press position to download", group="Temporary"}
+                   )))
+      end
+    },
 
     { rule = { name = "Picture in picture"},
       properties = { floating = true,
