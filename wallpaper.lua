@@ -15,6 +15,105 @@ local altkey         = "Mod1"
 local M = {}
 local notiWidth = 600
 
+-- Helper functions for ratio-based wallpaper selection
+M.getScreenRatio = function(s)
+   local width = s.geometry.width
+   local height = s.geometry.height
+   if width < height then
+      return "portrait"
+   else
+      return "landscape" -- includes square screens
+   end
+end
+
+M.getImageRatio = function(imagePath)
+   -- TODO: move this to non-blocking async run
+   local handle = io.popen("identify -ping -format '%w %h' '" .. imagePath .. "' 2>/dev/null")
+   if not handle then return "unknown" end
+   
+   local result = handle:read("*a")
+   handle:close()
+   
+   local width, height = result:match("(%d+) (%d+)")
+   if not width or not height then return "unknown" end
+   
+   width, height = tonumber(width), tonumber(height)
+   if width < height then
+      return "portrait"
+   else
+      return "landscape"
+   end
+end
+
+-- Lazy loading function to populate ratio-based caches
+M.populateRatioCaches = function(batchSize)
+   if not M.ratioBasedSelection or M.unprocessedCount == 0 then
+      return
+   end
+   
+   batchSize = batchSize or 10  -- Process 10 images at a time by default
+   local processed = 0
+   
+   while processed < batchSize and M.processedIdx <= #M.filelist do
+      local wallpaper = M.filelist[M.processedIdx]
+      if wallpaper and wallpaper ~= "" then
+         local ratio = M.getImageRatio(wallpaper)
+         if ratio == "portrait" then
+            table.insert(M.portraitList, {path = wallpaper, rawIdx = M.processedIdx})
+         elseif ratio == "landscape" then
+            table.insert(M.landscapeList, {path = wallpaper, rawIdx = M.processedIdx})
+         else
+            -- For unknown ratios, add to landscape as fallback
+            table.insert(M.landscapeList, {path = wallpaper, rawIdx = M.processedIdx})
+         end
+         processed = processed + 1
+      end
+      M.processedIdx = M.processedIdx + 1
+      M.unprocessedCount = M.unprocessedCount - 1
+   end
+end
+
+-- Get next wallpaper for the given ratio
+M.getNextWallpaperByRatio = function(desiredRatio)
+   if not M.ratioBasedSelection then
+      return nil, nil
+   end
+   
+   local targetList, targetIdx
+   if desiredRatio == "portrait" then
+      targetList = M.portraitList
+      targetIdx = M.portraitIdx
+   else
+      targetList = M.landscapeList  
+      targetIdx = M.landscapeIdx
+   end
+   
+   -- If we've reached the end of this list, try to populate more
+   if targetIdx > #targetList and M.unprocessedCount > 0 then
+      M.populateRatioCaches(10)
+   end
+   
+   -- If still no wallpapers available, fall back to the other ratio
+   if targetIdx > #targetList then
+      if desiredRatio == "portrait" and #M.landscapeList > 0 then
+         targetList = M.landscapeList
+         targetIdx = M.landscapeIdx
+      elseif desiredRatio == "landscape" and #M.portraitList > 0 then
+         targetList = M.portraitList
+         targetIdx = M.portraitIdx
+      else
+         return nil, nil
+      end
+   end
+   
+   if targetIdx <= #targetList then
+      local wallpaperInfo = targetList[targetIdx]
+      return wallpaperInfo.path, wallpaperInfo.rawIdx
+   end
+   
+   return nil, nil
+end
+
 
 local wallpaperFunction = {
    fit=gears.wallpaper.fit,
@@ -25,7 +124,15 @@ local wallpaperFunction = {
 
 M.init = function()
    M.filelist = {}
-   M.filelistPort = {}
+
+   -- Ratio-based wallpaper management
+   M.ratioBasedSelection = false
+   M.portraitList = {}      -- Cache for portrait wallpapers
+   M.landscapeList = {}     -- Cache for landscape wallpapers
+   M.portraitIdx = 1        -- Current index for portrait wallpapers
+   M.landscapeIdx = 1       -- Current index for landscape wallpapers
+   M.processedIdx = 1       -- Index of next unprocessed wallpaper in raw filelist
+   M.unprocessedCount = 0   -- Number of unprocessed wallpapers remaining
 
    M.showDesktopStatus = false
    M.showDesktopBuffer = {}
@@ -144,17 +251,39 @@ end
 M.setWallpaper = function(s)
 
    s.wallpaper = nil
+   s.wallpaperRawIdx = nil
+   
    if type(M.wallpaperPath) == "function" then
       s.wallpaper = M.wallpaperPath(s)
    else
       if (M.wallpaperPath:sub(-1) == "/" or M.wallpaperPath == "@combine") then
 
-        if M.currentIdx > #M.filelist then
-            M.currentIdx = 1 -- reset to the beginning
-        end
+        if M.ratioBasedSelection then
+           -- Use ratio-based selection
+           local desiredRatio = M.getScreenRatio(s)
+           local wallpaper, rawIdx = M.getNextWallpaperByRatio(desiredRatio)
+           
+           if wallpaper then
+              s.wallpaper = wallpaper
+              s.wallpaperRawIdx = rawIdx
+              
+              -- Advance the appropriate index
+              if desiredRatio == "portrait" then
+                 M.portraitIdx = M.portraitIdx + 1
+              else
+                 M.landscapeIdx = M.landscapeIdx + 1
+              end
+           end
+        else
+           -- Original non-ratio logic
+           if M.currentIdx > #M.filelist then
+               M.currentIdx = 1 -- reset to the beginning
+           end
 
-        s.wallpaper = M.filelist[M.currentIdx]
-        M.currentIdx = M.currentIdx + 1
+           s.wallpaper = M.filelist[M.currentIdx]
+           s.wallpaperRawIdx = M.currentIdx
+           M.currentIdx = M.currentIdx + 1
+        end
 
       else
          s.wallpaper = M.wallpaperPath
@@ -169,7 +298,8 @@ M.setWallpaper = function(s)
       
       wallpaperFunction[M.wallpaperMode](s.wallpaper, s)
 
-      local text = '  [' .. (M.currentIdx or 0) .. '/' .. #M.filelist .. ']  '
+      local displayIdx = s.wallpaperRawIdx or M.currentIdx or 0
+      local text = '  [' .. displayIdx .. '/' .. #M.filelist .. ']  '
       s.wallText:set_markup(text)
 
    end -- if s.wallpaper ~= nil
@@ -251,6 +381,14 @@ M.updateFilelist = function(doRefresh)
    
    M.currentIdx = 1
    M.filelist = {}
+   
+   -- Reset ratio-based caches
+   M.portraitList = {}
+   M.landscapeList = {}
+   M.portraitIdx = 1
+   M.landscapeIdx = 1
+   M.processedIdx = 1
+   M.unprocessedCount = 0
 
    if M.filelistCMD ~= nil then
       cmd = M.filelistCMD
@@ -282,6 +420,9 @@ M.updateFilelist = function(doRefresh)
          end
          fh:close()
          
+         -- Set unprocessed count for ratio-based selection
+         M.unprocessedCount = #M.filelist
+         
          naughty.notify({ title = "Wallpaper database updated!",
                           text  = "Found: " .. #M.filelist .. " items",
                           position = "bottom_middle",
@@ -306,11 +447,21 @@ M.refresh = function(resetTimer, shift)
    local resetTimer = resetTimer or false
    local shift = shift or 0
 
+   if M.ratioBasedSelection then
+      -- For ratio-based selection, advance both portrait and landscape indices
+      M.portraitIdx = M.portraitIdx + shift
+      M.landscapeIdx = M.landscapeIdx + shift
+      
+      if M.portraitIdx < 1 then M.portraitIdx = 1 end
+      if M.landscapeIdx < 1 then M.landscapeIdx = 1 end
+   else
+      -- Original logic for non-ratio mode
       -- twice as the currentIdx is now pointing to the next one
-    M.currentIdx = M.currentIdx + 2 * shift * screen:count()
-    if M.currentIdx < 1 then
-        M.currentIdx = 1
-    end
+      M.currentIdx = M.currentIdx + 2 * shift * screen:count()
+      if M.currentIdx < 1 then
+          M.currentIdx = 1
+      end
+   end
 
    M.setAllWallpapers()
 
@@ -324,9 +475,26 @@ M.refresh = function(resetTimer, shift)
 end
 
 M.shiftWallpaperForCurrentScreen = function(s, shift)
-   M.currentIdx = M.currentIdx + 2 * shift
-   if M.currentIdx < 1 then
-      M.currentIdx = nil
+
+   -- NOTE - below use 2 * shift as input shift is either 0 or 1, and setWallpaper function
+   --        will advance shift automatically
+   
+   if M.ratioBasedSelection then
+      -- For ratio-based selection, advance the appropriate index based on screen ratio
+      local desiredRatio = M.getScreenRatio(s)
+      if desiredRatio == "portrait" then
+         M.portraitIdx = M.portraitIdx + 2 * shift
+         if M.portraitIdx < 1 then M.portraitIdx = 1 end
+      else
+         M.landscapeIdx = M.landscapeIdx + 2 * shift
+         if M.landscapeIdx < 1 then M.landscapeIdx = 1 end
+      end
+   else
+      -- Original logic for non-ratio mode
+      M.currentIdx = M.currentIdx + 2 * shift
+      if M.currentIdx < 1 then
+         M.currentIdx = 1
+      end
    end
    M.setWallpaper(s)
 end
@@ -492,6 +660,7 @@ M.toggleGallery = function(idx, overrideCMD)
    M.wallpaperPath = beautiful.wallpaper[idx].path or "Not Defined"
    M.wallpaperMode = beautiful.wallpaper[idx].mode
    M.quiteMode     = beautiful.wallpaper[idx].quite or false
+   M.ratioBasedSelection = beautiful.wallpaper[idx].ratioBasedSelection or false
    -- M.shuffleMode   = beautiful.wallpaper[idx].shuffle or false
 
    M.filelistCMD   = beautiful.wallpaper[idx].cmd or nil

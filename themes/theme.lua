@@ -34,14 +34,16 @@ theme.wallpaper = {
       name="Normal",
 	  galleryType='folder',
       path=os.getenv("HOME") .. "/Pictures/wallpaper/",
-      mode="max", quite=true, interval=600
+      mode="max", quite=true, interval=600,
+      ratioBasedSelection=true
    },
    {
       name="Adult",
 	  galleryType='filelist',
       path=os.getenv("HOME") .. "/Pictures/wallpaper-adult/",
       mode="max", quite=true, interval=90,
-      cmd="shuf " .. os.getenv("HOME") .. "/Pictures/wallpaper-adult-filelist > /tmp/wall-list"
+      cmd="shuf " .. os.getenv("HOME") .. "/Pictures/wallpaper-adult-filelist > /tmp/wall-list",
+      ratioBasedSelection=true
    },
    {
       name="Custom",
@@ -50,6 +52,7 @@ theme.wallpaper = {
       mode="max", quite=true, interval=90,
       cmd="shuf " .. os.getenv("HOME") .. "/Pictures/custom-wallpaper-filelist > /tmp/wall-list",
       cmd_portrait="shuf " .. os.getenv("HOME") .. "/Pictures/custom-wallpaper-portrait-filelist > /tmp/wall-list",
+      ratioBasedSelection=true,
    },
 }
 
