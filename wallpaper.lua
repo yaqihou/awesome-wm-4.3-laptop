@@ -26,8 +26,37 @@ M.getScreenRatio = function(s)
    end
 end
 
+-- Async version of getImageRatio using awful.spawn
+M.getImageRatioAsync = function(imagePath, callback)
+   local cmd = "identify -ping -format '%w %h' '" .. imagePath .. "' 2>/dev/null"
+   
+   awful.spawn.easy_async_with_shell(cmd, function(stdout, stderr, exitreason, exitcode)
+      if exitcode ~= 0 or not stdout or stdout == "" then
+         callback("unknown")
+         return
+      end
+      
+      local width, height = stdout:match("(%d+) (%d+)")
+      if not width or not height then
+         callback("unknown")
+         return
+      end
+      
+      width, height = tonumber(width), tonumber(height)
+      local ratio
+      if width < height then
+         ratio = "portrait"
+      else
+         ratio = "landscape"
+      end
+      
+      callback(ratio)
+   end)
+end
+
+-- Legacy sync function (kept for backward compatibility, but deprecated)
 M.getImageRatio = function(imagePath)
-   -- TODO: move this to non-blocking async run
+   -- DEPRECATED: This function blocks awesome WM. Use getImageRatioAsync instead.
    local handle = io.popen("identify -ping -format '%w %h' '" .. imagePath .. "' 2>/dev/null")
    if not handle then return "unknown" end
    
@@ -45,8 +74,62 @@ M.getImageRatio = function(imagePath)
    end
 end
 
--- Lazy loading function to populate ratio-based caches
-M.populateRatioCaches = function(batchSize)
+-- Async lazy loading function to populate ratio-based caches
+M.populateRatioCaches = function(batchSize, callback)
+   if not M.ratioBasedSelection or M.unprocessedCount == 0 then
+      if callback then callback() end
+      return
+   end
+   
+   batchSize = batchSize or 10
+   local processed = 0
+   local toProcess = {}
+   
+   -- Collect wallpapers to process in this batch
+   while processed < batchSize and M.processedIdx <= #M.filelist do
+      local wallpaper = M.filelist[M.processedIdx]
+      if wallpaper and wallpaper ~= "" then
+         table.insert(toProcess, {path = wallpaper, rawIdx = M.processedIdx})
+         processed = processed + 1
+      end
+      M.processedIdx = M.processedIdx + 1
+      M.unprocessedCount = M.unprocessedCount - 1
+   end
+   
+   if #toProcess == 0 then
+      if callback then callback() end
+      return
+   end
+   
+   -- Process each wallpaper asynchronously
+   local completedCount = 0
+   local function onRatioDetected(wallpaperInfo, ratio)
+      if ratio == "portrait" then
+         table.insert(M.portraitList, wallpaperInfo)
+      elseif ratio == "landscape" then
+         table.insert(M.landscapeList, wallpaperInfo)
+      else
+         -- For unknown ratios, add to landscape as fallback
+         table.insert(M.landscapeList, wallpaperInfo)
+      end
+      
+      completedCount = completedCount + 1
+      if completedCount == #toProcess then
+         -- All async operations completed
+         if callback then callback() end
+      end
+   end
+   
+   -- Start async processing for each wallpaper
+   for _, wallpaperInfo in ipairs(toProcess) do
+      M.getImageRatioAsync(wallpaperInfo.path, function(ratio)
+         onRatioDetected(wallpaperInfo, ratio)
+      end)
+   end
+end
+
+-- Legacy sync version (kept for backward compatibility but deprecated)
+M.populateRatioCachesSync = function(batchSize)
    if not M.ratioBasedSelection or M.unprocessedCount == 0 then
       return
    end
@@ -73,7 +156,64 @@ M.populateRatioCaches = function(batchSize)
    end
 end
 
--- Get next wallpaper for the given ratio
+-- Async version of getNextWallpaperByRatio (recommended for performance)
+M.getNextWallpaperByRatioAsync = function(desiredRatio, callback)
+   if not M.ratioBasedSelection then
+      callback(nil, nil)
+      return
+   end
+   
+   local targetList, targetIdx
+   if desiredRatio == "portrait" then
+      targetList = M.portraitList
+      targetIdx = M.portraitIdx
+   else
+      targetList = M.landscapeList  
+      targetIdx = M.landscapeIdx
+   end
+   
+   -- Check if we already have a wallpaper available
+   if targetIdx <= #targetList then
+      local wallpaperInfo = targetList[targetIdx]
+      callback(wallpaperInfo.path, wallpaperInfo.rawIdx)
+      return
+   end
+   
+   -- Need to populate more caches with multi-batch search
+   local maxSearchAttempts = M.maxSearchAttempts or 5
+   local searchAttempts = 0
+   
+   local function tryNextBatch()
+      if targetIdx <= #targetList then
+         -- Found a wallpaper
+         local wallpaperInfo = targetList[targetIdx]
+         callback(wallpaperInfo.path, wallpaperInfo.rawIdx)
+         return
+      end
+      
+      if M.unprocessedCount == 0 or searchAttempts >= maxSearchAttempts then
+         -- No more wallpapers to process or max attempts reached, try fallback
+         if desiredRatio == "portrait" and #M.landscapeList > 0 then
+            local wallpaperInfo = M.landscapeList[M.landscapeIdx]
+            callback(wallpaperInfo.path, wallpaperInfo.rawIdx)
+         elseif desiredRatio == "landscape" and #M.portraitList > 0 then
+            local wallpaperInfo = M.portraitList[M.portraitIdx]
+            callback(wallpaperInfo.path, wallpaperInfo.rawIdx)
+         else
+            callback(nil, nil)
+         end
+         return
+      end
+      
+      -- Try another batch
+      searchAttempts = searchAttempts + 1
+      M.populateRatioCaches(10, tryNextBatch)
+   end
+   
+   tryNextBatch()
+end
+
+-- Synchronous version (for backward compatibility, but uses blocking operations)
 M.getNextWallpaperByRatio = function(desiredRatio)
    if not M.ratioBasedSelection then
       return nil, nil
@@ -88,12 +228,12 @@ M.getNextWallpaperByRatio = function(desiredRatio)
       targetIdx = M.landscapeIdx
    end
    
-   -- Multi-batch search: try multiple batches before giving up
+   -- Multi-batch search using sync version for compatibility
    local maxSearchAttempts = M.maxSearchAttempts or 5
    local searchAttempts = 0
    
    while targetIdx > #targetList and M.unprocessedCount > 0 and searchAttempts < maxSearchAttempts do
-      M.populateRatioCaches(10)
+      M.populateRatioCachesSync(10)  -- Use sync version to maintain API compatibility
       searchAttempts = searchAttempts + 1
    end
    
@@ -253,6 +393,72 @@ end
 --    return md5
 -- end
 
+-- Async version of setWallpaper (recommended for performance)
+M.setWallpaperAsync = function(s, callback)
+   s.wallpaper = nil
+   s.wallpaperRawIdx = nil
+   
+   if type(M.wallpaperPath) == "function" then
+      s.wallpaper = M.wallpaperPath(s)
+      M.finalizeWallpaperSetting(s)
+      if callback then callback() end
+   else
+      if (M.wallpaperPath:sub(-1) == "/" or M.wallpaperPath == "@combine") then
+         if M.ratioBasedSelection then
+            -- Use async ratio-based selection
+            local desiredRatio = M.getScreenRatio(s)
+            M.getNextWallpaperByRatioAsync(desiredRatio, function(wallpaper, rawIdx)
+               if wallpaper then
+                  s.wallpaper = wallpaper
+                  s.wallpaperRawIdx = rawIdx
+                  
+                  -- Advance the appropriate index
+                  if desiredRatio == "portrait" then
+                     M.portraitIdx = M.portraitIdx + 1
+                  else
+                     M.landscapeIdx = M.landscapeIdx + 1
+                  end
+               end
+               
+               M.finalizeWallpaperSetting(s)
+               if callback then callback() end
+            end)
+            return -- Exit early since we're handling async
+         else
+            -- Original non-ratio logic
+            if M.currentIdx > #M.filelist then
+                M.currentIdx = 1 -- reset to the beginning
+            end
+
+            s.wallpaper = M.filelist[M.currentIdx]
+            s.wallpaperRawIdx = M.currentIdx
+            M.currentIdx = M.currentIdx + 1
+         end
+      else
+         s.wallpaper = M.wallpaperPath
+      end
+      
+      M.finalizeWallpaperSetting(s)
+      if callback then callback() end
+   end
+end
+
+-- Helper function to finalize wallpaper setting (shared between sync and async)
+M.finalizeWallpaperSetting = function(s)
+   if s.wallpaper ~= nil then
+      if not M.quiteMode then
+         M.showWallpaperInfo(s)
+      end
+      
+      wallpaperFunction[M.wallpaperMode](s.wallpaper, s)
+
+      local displayIdx = s.wallpaperRawIdx or M.currentIdx or 0
+      local text = '  [' .. displayIdx .. '/' .. #M.filelist .. ']  '
+      s.wallText:set_markup(text)
+   end
+end
+
+-- Synchronous version (for backward compatibility)
 M.setWallpaper = function(s)
 
    s.wallpaper = nil
@@ -295,19 +501,7 @@ M.setWallpaper = function(s)
       end
    end -- if type(beautiful.wallpaper)
 
-   if s.wallpaper ~= nil then
-
-      if not M.quiteMode then
-         M.showWallpaperInfo(s)
-      end
-      
-      wallpaperFunction[M.wallpaperMode](s.wallpaper, s)
-
-      local displayIdx = s.wallpaperRawIdx or M.currentIdx or 0
-      local text = '  [' .. displayIdx .. '/' .. #M.filelist .. ']  '
-      s.wallText:set_markup(text)
-
-   end -- if s.wallpaper ~= nil
+   M.finalizeWallpaperSetting(s)
 end
 
 M.changeWallpaperMode = function(mode)
@@ -435,12 +629,39 @@ M.updateFilelist = function(doRefresh)
                           width = notiWidth})
          
          if doRefresh then
-            M.setAllWallpapers()
+            -- M.setAllWallpapers()
+            M.setAllWallpapersAsync()
          end
    end)
    
 end -- end of M.updateFilelist
 
+-- Async version of setAllWallpapers
+M.setAllWallpapersAsync = function(callback)
+   local screens = {}
+   for s in screen do
+      table.insert(screens, s)
+   end
+   
+   if #screens == 0 then
+      if callback then callback() end
+      return
+   end
+   
+   local completedCount = 0
+   local function onWallpaperSet()
+      completedCount = completedCount + 1
+      if completedCount == #screens then
+         if callback then callback() end
+      end
+   end
+   
+   for _, s in ipairs(screens) do
+      M.setWallpaperAsync(s, onWallpaperSet)
+   end
+end
+
+-- Synchronous version (for backward compatibility)
 M.setAllWallpapers = function()
    for s in screen do
       M.setWallpaper(s)
@@ -468,7 +689,8 @@ M.refresh = function(resetTimer, shift)
       end
    end
 
-   M.setAllWallpapers()
+   -- M.setAllWallpapers()
+   M.setAllWallpapersAsync()
 
    if resetTimer then
       M.timer:again()
@@ -501,7 +723,8 @@ M.shiftWallpaperForCurrentScreen = function(s, shift)
          M.currentIdx = 1
       end
    end
-   M.setWallpaper(s)
+   -- M.setWallpaper(s)
+   M.setWallpaperAsync(s)
 end
 
 local function notiOnIgnore(s, reverse, notiTextExtra)
