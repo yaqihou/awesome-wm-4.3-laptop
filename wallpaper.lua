@@ -31,7 +31,7 @@ M.getImageRatioAsync = function(imagePath, callback)
    -- First check persistent cache
    local cachedRatio, cachedWidth, cachedHeight = M.getCachedRatio(imagePath)
    if cachedRatio then
-      callback(cachedRatio, cachedWidth, cachedHeight)
+      callback(cachedRatio, cachedWidth, cachedHeight, true)  -- true = from cache
       return
    end
    
@@ -40,13 +40,13 @@ M.getImageRatioAsync = function(imagePath, callback)
    
    awful.spawn.easy_async_with_shell(cmd, function(stdout, stderr, exitreason, exitcode)
       if exitcode ~= 0 or not stdout or stdout == "" then
-         callback("unknown", nil, nil)
+         callback("unknown", nil, nil, nil)  -- nil = invalid result, not cacheable
          return
       end
       
       local width, height = stdout:match("(%d+) (%d+)")
       if not width or not height then
-         callback("unknown", nil, nil)
+         callback("unknown", nil, nil, nil)  -- nil = invalid result, not cacheable
          return
       end
       
@@ -61,7 +61,7 @@ M.getImageRatioAsync = function(imagePath, callback)
       -- Cache the result for future use
       M.cacheRatio(imagePath, ratio, width, height)
       
-      callback(ratio, width, height)
+      callback(ratio, width, height, false)  -- false = not from cache (new entry)
    end)
 end
 
@@ -115,7 +115,9 @@ M.populateRatioCaches = function(batchSize, callback)
    -- Process each wallpaper asynchronously and store results for ordered insertion
    local completedCount = 0
    local results = {}
-   local function onRatioDetected(wallpaperInfo, ratio, width, height)
+   local hasNewEntries = false  -- Track if we actually added new cache entries
+   
+   local function onRatioDetected(wallpaperInfo, ratio, width, height, wasFromCache)
       -- Store wallpaper info with dimensions
       local enhancedInfo = {
          path = wallpaperInfo.path,
@@ -124,6 +126,12 @@ M.populateRatioCaches = function(batchSize, callback)
          height = height
       }
       results[wallpaperInfo.rawIdx] = {info = enhancedInfo, ratio = ratio}
+      
+      -- Track if this was a new cache entry (not from cache)
+      -- Only count valid results (wasFromCache = false means new valid entry)
+      if wasFromCache == false then
+         hasNewEntries = true
+      end
       
       completedCount = completedCount + 1
       if completedCount == #toProcess then
@@ -148,8 +156,10 @@ M.populateRatioCaches = function(batchSize, callback)
             end
          end
          
-         -- Save cache after processing batch (non-blocking)
-         M.saveRatioCache("auto")
+         -- Only save cache if we actually added new entries
+         if hasNewEntries then
+            M.saveRatioCache("auto")
+         end
          
          if callback then callback() end
       end
@@ -157,8 +167,8 @@ M.populateRatioCaches = function(batchSize, callback)
    
    -- Start async processing for each wallpaper
    for _, wallpaperInfo in ipairs(toProcess) do
-      M.getImageRatioAsync(wallpaperInfo.path, function(ratio, width, height)
-         onRatioDetected(wallpaperInfo, ratio, width, height)
+      M.getImageRatioAsync(wallpaperInfo.path, function(ratio, width, height, wasFromCache)
+         onRatioDetected(wallpaperInfo, ratio, width, height, wasFromCache)
       end)
    end
 end
@@ -724,7 +734,7 @@ M.getWallpaperDimensions = function(wallpaperPath, callback)
    end
    
    -- Not in cache, fetch dimensions
-   M.getImageRatioAsync(wallpaperPath, function(ratio, width, height)
+   M.getImageRatioAsync(wallpaperPath, function(ratio, width, height, wasFromCache)
       if width and height then
          M.dimensionCache[wallpaperPath] = {width = width, height = height}
          callback(width, height)
