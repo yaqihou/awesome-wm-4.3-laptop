@@ -28,6 +28,14 @@ end
 
 -- Async version of getImageRatio using awful.spawn with dimension caching
 M.getImageRatioAsync = function(imagePath, callback)
+   -- First check persistent cache
+   local cachedRatio, cachedWidth, cachedHeight = M.getCachedRatio(imagePath)
+   if cachedRatio then
+      callback(cachedRatio, cachedWidth, cachedHeight)
+      return
+   end
+   
+   -- Cache miss, use ImageMagick identify
    local cmd = "identify -ping -format '%w %h' '" .. imagePath .. "' 2>/dev/null"
    
    awful.spawn.easy_async_with_shell(cmd, function(stdout, stderr, exitreason, exitcode)
@@ -49,6 +57,9 @@ M.getImageRatioAsync = function(imagePath, callback)
       else
          ratio = "landscape"
       end
+      
+      -- Cache the result for future use
+      M.cacheRatio(imagePath, ratio, width, height)
       
       callback(ratio, width, height)
    end)
@@ -136,6 +147,9 @@ M.populateRatioCaches = function(batchSize, callback)
                table.insert(M.landscapeList, result.info)
             end
          end
+         
+         -- Save cache after processing batch (non-blocking)
+         M.saveRatioCache()
          
          if callback then callback() end
       end
@@ -338,6 +352,12 @@ M.init = function()
    
    -- Dimension cache for wallpapers (path -> {width, height})
    M.dimensionCache = {}
+   
+   -- Persistent ratio cache settings
+   M.ratioCache = {}                -- Runtime cache: path -> {ratio, width, height, mtime}
+   M.cacheFilePath = os.getenv("HOME") .. "/.config/awesome/wallpaper-ratio-cache.json"
+   M.cacheVersion = "1.0"
+   -- M.maxCacheEntries = 10000        -- Limit cache size
 
    M.showDesktopStatus = false
    M.showDesktopBuffer = {}
@@ -384,6 +404,7 @@ M.init = function()
       { "Change Wallpaper Mode", modeMenu},
       { "Update Wallpaper Files", function() M.updateFilelist() end},
       { "Change Wallpaper Interval", function() M.changeWallpaperInterval() end},
+      { "Clear Wallpaper Cache", function() M.clearRatioCache() end},
       -- { "[DB Only] Set Tag", function() M.setTag() end}
    }
    
@@ -395,7 +416,11 @@ M.init = function()
             { "Switch Wallpaper Gallery", toggleMenu},
          }
    })
-   M.toggleGallery(1)
+   
+   -- Load persistent ratio cache async, then toggle gallery
+   M.loadRatioCache(function()
+      M.toggleGallery(1)
+   end)
 
 end -- M.init
 
@@ -705,6 +730,165 @@ M.getWallpaperDimensions = function(wallpaperPath, callback)
          callback(nil, nil)
       end
    end)
+end
+
+-- Persistent ratio cache functions
+M.loadRatioCache = function(callback)
+   local cmd = "cat '" .. M.cacheFilePath .. "' 2>/dev/null"
+   
+   awful.spawn.easy_async_with_shell(
+	  cmd,
+	  function(stdout, stderr, exitreason, exitcode)
+		 if exitcode ~= 0 or not stdout or stdout == "" then
+			-- Cache file doesn't exist or empty, start with empty cache
+			if callback then callback() end
+			return
+		 end
+		 
+		 local content = stdout
+		 
+		 -- Simple JSON parsing for cache structure
+		 local success, cache_data = pcall(function()
+			   -- Use a simple JSON-like format that's safe for Lua
+			   local loadstring_func = loadstring or load
+			   local func = loadstring_func("return " .. content)
+			   if func then
+				  return func()
+			   end
+			   return nil
+		 end)
+		 
+		 if not success or not cache_data or not cache_data.version or not cache_data.cache then
+			-- Invalid cache format, start fresh
+			print("Invalid wallpaper ratio cache")
+			return
+		 end
+		 
+		 -- Version check
+		 if cache_data.version ~= M.cacheVersion then
+			-- Version mismatch, start fresh
+			return
+		 end
+		 
+		 -- Validate and load cache entries
+		 local validEntries = 0
+		 for filePath, entry in pairs(cache_data.cache) do
+			if type(filePath) == "string" and type(entry) == "table" and 
+			   entry.ratio and entry.width and entry.height then
+			   
+			   M.ratioCache[filePath] = entry
+			   validEntries = validEntries + 1
+			end
+		 end
+		 
+		 -- Limit cache size by keeping most recently accessed entries
+		 -- if validEntries > M.maxCacheEntries then
+		 --    -- Simple approach: clear cache and let it rebuild
+		 --    M.ratioCache = {}
+		 -- end
+		 
+		 if callback then callback() end
+   end)
+end
+
+M.saveRatioCache = function()
+   -- Create cache data structure
+   local cache_data = {
+      version = M.cacheVersion,
+      last_updated = os.date("%Y-%m-%dT%H:%M:%S"),
+      cache = M.ratioCache
+   }
+   
+   -- Simple serialization that's safe for Lua
+   local function serializeTable(t, indent)
+      indent = indent or 0
+      local result = "{\n"
+      local indentStr = string.rep("  ", indent + 1)
+      
+      for k, v in pairs(t) do
+         result = result .. indentStr .. "[" .. string.format("%q", k) .. "] = "
+         
+         if type(v) == "table" then
+            result = result .. serializeTable(v, indent + 1)
+         elseif type(v) == "string" then
+            result = result .. string.format("%q", v)
+         else
+            result = result .. tostring(v)
+         end
+         result = result .. ",\n"
+      end
+      
+      result = result .. string.rep("  ", indent) .. "}"
+      return result
+   end
+   
+   local content = serializeTable(cache_data)
+   
+   -- Write to temporary file first for atomic operation
+   local temp_file_path = M.cacheFilePath .. ".tmp"
+   local file = io.open(temp_file_path, "w")
+   if not file then
+      -- Can't write cache, fail silently
+      return false
+   end
+   
+   file:write(content)
+   file:close()
+   
+   -- Atomic move from temp file to actual file
+   os.rename(temp_file_path, M.cacheFilePath)
+   return true
+end
+
+M.getCachedRatio = function(imagePath)
+   local entry = M.ratioCache[imagePath]
+   if not entry then
+      return nil, nil, nil
+   end
+   
+   return entry.ratio, entry.width, entry.height
+end
+
+M.cacheRatio = function(imagePath, ratio, width, height)
+   
+   M.ratioCache[imagePath] = {
+      ratio = ratio,
+      width = width,
+      height = height,
+   }
+   
+   -- Periodically save cache (every 50 new entries)
+   local cache_size = 0
+   for _ in pairs(M.ratioCache) do
+      cache_size = cache_size + 1
+   end
+   
+   if cache_size % 50 == 0 then
+      M.saveRatioCache()
+   end
+end
+
+M.clearRatioCache = function()
+   -- Clear runtime cache
+   M.ratioCache = {}
+   
+   -- Remove cache file
+   os.remove(M.cacheFilePath)
+   
+   -- Show notification
+   naughty.notify({ 
+      title = "Wallpaper Cache Cleared",
+      text = "Persistent ratio cache has been cleared. Wallpaper ratios will be recalculated as needed.",
+      position = "bottom_middle",
+      icon = beautiful.refreshed, 
+      icon_size = 64,
+      width = notiWidth
+   })
+end
+
+M.saveRatioCacheOnExit = function()
+   -- Save cache before AwesomeWM exits
+   M.saveRatioCache()
 end
 
 -- Helper function to check if we need predictive preloading
@@ -1081,5 +1265,8 @@ M.keybindings = awful.util.table.join(
          { modkey, "Control" }, "d", M.toggleShowDesktop,
          {description = "Show Desktop", group = "awesome"})
 )
+
+-- Save cache when AwesomeWM is about to exit (can be called from main rc.lua)
+awesome.connect_signal("exit", M.saveRatioCacheOnExit)
 
 return M
