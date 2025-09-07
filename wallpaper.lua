@@ -101,21 +101,35 @@ M.populateRatioCaches = function(batchSize, callback)
       return
    end
    
-   -- Process each wallpaper asynchronously
+   -- Process each wallpaper asynchronously and store results for ordered insertion
    local completedCount = 0
+   local results = {}
    local function onRatioDetected(wallpaperInfo, ratio)
-      if ratio == "portrait" then
-         table.insert(M.portraitList, wallpaperInfo)
-      elseif ratio == "landscape" then
-         table.insert(M.landscapeList, wallpaperInfo)
-      else
-         -- For unknown ratios, add to landscape as fallback
-         table.insert(M.landscapeList, wallpaperInfo)
-      end
+      results[wallpaperInfo.rawIdx] = {info = wallpaperInfo, ratio = ratio}
       
       completedCount = completedCount + 1
       if completedCount == #toProcess then
-         -- All async operations completed
+         -- All async operations completed, now insert in order
+         -- Sort results by raw index to maintain file order
+         local sortedIndices = {}
+         for rawIdx, _ in pairs(results) do
+            table.insert(sortedIndices, rawIdx)
+         end
+         table.sort(sortedIndices)
+         
+         -- Insert wallpapers in the correct order
+         for _, rawIdx in ipairs(sortedIndices) do
+            local result = results[rawIdx]
+            if result.ratio == "portrait" then
+               table.insert(M.portraitList, result.info)
+            elseif result.ratio == "landscape" then
+               table.insert(M.landscapeList, result.info)
+            else
+               -- For unknown ratios, add to landscape as fallback
+               table.insert(M.landscapeList, result.info)
+            end
+         end
+         
          if callback then callback() end
       end
    end
@@ -564,53 +578,6 @@ M.changeWallpaperMode = function(mode)
 
 end
 
--- M.setTag = function()
---    awful.prompt.run {
---       prompt       = '<b>Tag: </b>',
---       -- text         = tostring(M.timer.timeout),
---       bg_cursor    = '#ff0000',
---       -- To use the default rc.lua prompt:
---       textbox      = mouse.screen.mypromptbox.widget,
---       exe_callback = function(input)
---          if input then
---             naughty.notify{
---                text = 'Querying database for tag: '.. input,
---                position = "bottom_middle",
---                width = notiWidth
---             }
---             cmd = "sqlite3 " .. os.getenv("HOME") .. "/Pictures/database.db "
---                .. "'select FilePath from MAIN_TBL where ID in "
---                .. "(select ImgID from IMG_TO_TAG as A inner join TAG_TBL as B on A.TagID=B.ID "
---                .. 'where TagName="' .. input .. '"' .. ") AND WALLPAPER=0' | shuf > /tmp/wall-list"
-            
---             awful.spawn.easy_async_with_shell(
---                cmd .. "-new",
---                function(out)
---                   fh = io.open('/tmp/wall-list-new')
---                   if fh:seek("end") ~= 0 then
---                      fh:close()
---                      M.filelistCMD = "mv /tmp/wall-list-new /tmp/wall-list"
---                      if M.galleryName == "HCG-R18" then
---                         M.updateFilelist(true)
---                      else
---                         M.toggleGallery(3, M.filelistCMD)
---                      end
---                      M.currentTag = input
---                      M.filelistCMD = cmd
---                   else
---                      fh:close()
---                      naughty.notify{
---                         text = "Didn't find any wallpapers matching tag.\nCMD:" .. cmd,
---                         position = "bottom_middle",
---                         width = notiWidth}
---                   end
---             end)
-            
---          end
---       end
---    }
--- end
-
 M.updateFilelist = function(doRefresh)
    local cmd
    
@@ -672,7 +639,27 @@ M.updateFilelist = function(doRefresh)
    
 end -- end of M.updateFilelist
 
--- Async version of setAllWallpapers
+-- Helper function to check if we need predictive preloading
+M.checkPredictivePreloading = function()
+   if not M.ratioBasedSelection then return end
+   
+   local screenCount = screen:count()
+   local preloadThreshold = screenCount * 3  -- Preload when we have less than 3x screens worth
+   
+   -- Check if portrait list is getting low
+   local portraitRemaining = #M.portraitList - M.portraitIdx + 1
+   if portraitRemaining <= preloadThreshold and M.unprocessedCount > 0 then
+      M.populateRatioCaches(15)  -- Non-blocking preload
+   end
+   
+   -- Check if landscape list is getting low  
+   local landscapeRemaining = #M.landscapeList - M.landscapeIdx + 1
+   if landscapeRemaining <= preloadThreshold and M.unprocessedCount > 0 then
+      M.populateRatioCaches(15)  -- Non-blocking preload
+   end
+end
+
+-- Async version of setAllWallpapers with preloading
 M.setAllWallpapersAsync = function(callback)
    local screens = {}
    for s in screen do
@@ -684,10 +671,28 @@ M.setAllWallpapersAsync = function(callback)
       return
    end
    
+   -- For ratio-based selection, preload if both lists are empty (first run scenario)
+   if M.ratioBasedSelection and #M.portraitList == 0 and #M.landscapeList == 0 and M.unprocessedCount > 0 then
+      -- Initial preloading to avoid race conditions between multiple screens
+      local initialBatchSize = math.min(20, M.unprocessedCount)
+      M.populateRatioCaches(initialBatchSize, function()
+         -- After preloading, set wallpapers on all screens
+         M.setAllWallpapersSequentially(screens, callback)
+      end)
+   else
+      -- No preloading needed or not ratio-based, proceed directly
+      M.setAllWallpapersSequentially(screens, callback)
+   end
+end
+
+-- Set wallpapers sequentially to avoid race conditions
+M.setAllWallpapersSequentially = function(screens, callback)
    local completedCount = 0
    local function onWallpaperSet()
       completedCount = completedCount + 1
       if completedCount == #screens then
+         -- After all wallpapers are set, do predictive preloading
+         M.checkPredictivePreloading()
          if callback then callback() end
       end
    end
@@ -759,8 +764,11 @@ M.shiftWallpaperForCurrentScreen = function(s, shift)
          M.currentIdx = math.max(#M.filelist, 1)
       end
    end
-   -- M.setWallpaper(s)
-   M.setWallpaperAsync(s)
+   
+   -- Set wallpaper and then check if we need predictive preloading
+   M.setWallpaperAsync(s, function()
+      M.checkPredictivePreloading()
+   end)
 end
 
 local function notiOnIgnore(s, reverse, notiTextExtra)
@@ -965,7 +973,6 @@ M.toggleGallery = function(idx, overrideCMD)
    if (M.wallpaperPath:sub(-1) == "/" or M.wallpaperPath == "@combine") then
       M.updateFilelist(true)
    end
-
 
 end
 
