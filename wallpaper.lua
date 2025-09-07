@@ -26,19 +26,19 @@ M.getScreenRatio = function(s)
    end
 end
 
--- Async version of getImageRatio using awful.spawn
+-- Async version of getImageRatio using awful.spawn with dimension caching
 M.getImageRatioAsync = function(imagePath, callback)
    local cmd = "identify -ping -format '%w %h' '" .. imagePath .. "' 2>/dev/null"
    
    awful.spawn.easy_async_with_shell(cmd, function(stdout, stderr, exitreason, exitcode)
       if exitcode ~= 0 or not stdout or stdout == "" then
-         callback("unknown")
+         callback("unknown", nil, nil)
          return
       end
       
       local width, height = stdout:match("(%d+) (%d+)")
       if not width or not height then
-         callback("unknown")
+         callback("unknown", nil, nil)
          return
       end
       
@@ -50,7 +50,7 @@ M.getImageRatioAsync = function(imagePath, callback)
          ratio = "landscape"
       end
       
-      callback(ratio)
+      callback(ratio, width, height)
    end)
 end
 
@@ -104,8 +104,15 @@ M.populateRatioCaches = function(batchSize, callback)
    -- Process each wallpaper asynchronously and store results for ordered insertion
    local completedCount = 0
    local results = {}
-   local function onRatioDetected(wallpaperInfo, ratio)
-      results[wallpaperInfo.rawIdx] = {info = wallpaperInfo, ratio = ratio}
+   local function onRatioDetected(wallpaperInfo, ratio, width, height)
+      -- Store wallpaper info with dimensions
+      local enhancedInfo = {
+         path = wallpaperInfo.path,
+         rawIdx = wallpaperInfo.rawIdx,
+         width = width,
+         height = height
+      }
+      results[wallpaperInfo.rawIdx] = {info = enhancedInfo, ratio = ratio}
       
       completedCount = completedCount + 1
       if completedCount == #toProcess then
@@ -136,8 +143,8 @@ M.populateRatioCaches = function(batchSize, callback)
    
    -- Start async processing for each wallpaper
    for _, wallpaperInfo in ipairs(toProcess) do
-      M.getImageRatioAsync(wallpaperInfo.path, function(ratio)
-         onRatioDetected(wallpaperInfo, ratio)
+      M.getImageRatioAsync(wallpaperInfo.path, function(ratio, width, height)
+         onRatioDetected(wallpaperInfo, ratio, width, height)
       end)
    end
 end
@@ -328,6 +335,9 @@ M.init = function()
    M.processedIdx = 1       -- Index of next unprocessed wallpaper in raw filelist
    M.unprocessedCount = 0   -- Number of unprocessed wallpapers remaining
    M.maxSearchAttempts = 5  -- Maximum batches to search before falling back to other orientation
+   
+   -- Dimension cache for wallpapers (path -> {width, height})
+   M.dimensionCache = {}
 
    M.showDesktopStatus = false
    M.showDesktopBuffer = {}
@@ -366,7 +376,6 @@ M.init = function()
       { "Show Wallpaper Info", function() M.showWallpaperInfo(awful.screen.focused()) end},
       { "View Wallpaper File", function() M.openWallpaperFile(awful.screen.focused()) end},
       { "Open Wallpaper Directory", function() M.openWallpaperDirectory(awful.screen.focused()) end},
-      -- { "Copied Current MD5", function() M.copyMD5(awful.screen.focused()) end},
       { "Ignore Current Wallpaper", function() M.ignoreCurrentWallpaper(awful.screen.focused()) end},
       { "Accept Current Wallpaper", function() M.ignoreCurrentWallpaper(awful.screen.focused(), true) end}
    }
@@ -433,20 +442,12 @@ local function split(s, delimiter)
     return result;
 end
 
--- local function getMD5(path)
---    local tmp = split(path, '_')
---    if tmp then
---       md5 = tmp[#tmp]:sub(1, 32)
---    else
---       md5 = false
---    end
---    return md5
--- end
-
 -- Async version of setWallpaper (recommended for performance)
 M.setWallpaperAsync = function(s, callback)
    s.wallpaper = nil
    s.wallpaperRawIdx = nil
+   s.wallpaperRatioIdx = nil
+   s.wallpaperRatio = nil
    
    if type(M.wallpaperPath) == "function" then
       s.wallpaper = M.wallpaperPath(s)
@@ -462,10 +463,14 @@ M.setWallpaperAsync = function(s, callback)
                   s.wallpaper = wallpaper
                   s.wallpaperRawIdx = rawIdx
                   
-                  -- Advance the appropriate index based on ACTUAL orientation used (not desired)
+                  -- Store screen-specific ratio index before advancing global index
                   if actualRatio == "portrait" then
+                     s.wallpaperRatioIdx = M.portraitIdx
+                     s.wallpaperRatio = "portrait"
                      M.portraitIdx = M.portraitIdx + 1
                   elseif actualRatio == "landscape" then
+                     s.wallpaperRatioIdx = M.landscapeIdx
+                     s.wallpaperRatio = "landscape"
                      M.landscapeIdx = M.landscapeIdx + 1
                   end
                end
@@ -503,7 +508,27 @@ M.finalizeWallpaperSetting = function(s)
       wallpaperFunction[M.wallpaperMode](s.wallpaper, s)
 
       local displayIdx = s.wallpaperRawIdx or M.currentIdx or 0
-      local text = '  [' .. displayIdx .. '/' .. #M.filelist .. ']  '
+      local text
+      
+      if M.ratioBasedSelection and s.wallpaperRatioIdx and s.wallpaperRatio then
+         -- Show both raw index and screen-specific ratio index
+         local ratioTotal, ratioText
+         
+         if s.wallpaperRatio == "portrait" then
+            ratioTotal = #M.portraitList
+			ratioText = "P"
+         else
+            ratioTotal = #M.landscapeList
+			ratioText = "L"
+         end
+         
+         -- Format: [raw_index/total_raw] [screen_ratio_index/ratio_total orientation]
+         text = '  [' .. displayIdx .. '/' .. #M.filelist .. ' - ' .. s.wallpaperRatioIdx .. '/' .. ratioTotal .. ' ' .. ratioText .. ']  '
+      else
+         -- Original format for non-ratio mode or when ratio info not available
+         text = '  [' .. displayIdx .. '/' .. #M.filelist .. ']  '
+      end
+      
       s.wallText:set_markup(text)
    end
 end
@@ -513,6 +538,8 @@ M.setWallpaper = function(s)
 
    s.wallpaper = nil
    s.wallpaperRawIdx = nil
+   s.wallpaperRatioIdx = nil
+   s.wallpaperRatio = nil
    
    if type(M.wallpaperPath) == "function" then
       s.wallpaper = M.wallpaperPath(s)
@@ -528,10 +555,14 @@ M.setWallpaper = function(s)
               s.wallpaper = wallpaper
               s.wallpaperRawIdx = rawIdx
               
-              -- Advance the appropriate index based on ACTUAL orientation used (not desired)
+              -- Store screen-specific ratio index before advancing global index
               if actualRatio == "portrait" then
+                 s.wallpaperRatioIdx = M.portraitIdx
+                 s.wallpaperRatio = "portrait"
                  M.portraitIdx = M.portraitIdx + 1
               elseif actualRatio == "landscape" then
+                 s.wallpaperRatioIdx = M.landscapeIdx
+                 s.wallpaperRatio = "landscape"
                  M.landscapeIdx = M.landscapeIdx + 1
               end
            end
@@ -591,6 +622,7 @@ M.updateFilelist = function(doRefresh)
    M.landscapeIdx = 1
    M.processedIdx = 1
    M.unprocessedCount = 0
+   M.dimensionCache = {}
 
    if M.filelistCMD ~= nil then
       cmd = M.filelistCMD
@@ -638,6 +670,42 @@ M.updateFilelist = function(doRefresh)
    end)
    
 end -- end of M.updateFilelist
+
+-- Helper function to get wallpaper dimensions (from cache or fetch)
+M.getWallpaperDimensions = function(wallpaperPath, callback)
+   -- First check dimension cache
+   if M.dimensionCache[wallpaperPath] then
+      callback(M.dimensionCache[wallpaperPath].width, M.dimensionCache[wallpaperPath].height)
+      return
+   end
+   
+   -- Check if it exists in ratio caches
+   for _, wallpaperInfo in ipairs(M.portraitList) do
+      if wallpaperInfo.path == wallpaperPath and wallpaperInfo.width and wallpaperInfo.height then
+         M.dimensionCache[wallpaperPath] = {width = wallpaperInfo.width, height = wallpaperInfo.height}
+         callback(wallpaperInfo.width, wallpaperInfo.height)
+         return
+      end
+   end
+   
+   for _, wallpaperInfo in ipairs(M.landscapeList) do
+      if wallpaperInfo.path == wallpaperPath and wallpaperInfo.width and wallpaperInfo.height then
+         M.dimensionCache[wallpaperPath] = {width = wallpaperInfo.width, height = wallpaperInfo.height}
+         callback(wallpaperInfo.width, wallpaperInfo.height)
+         return
+      end
+   end
+   
+   -- Not in cache, fetch dimensions
+   M.getImageRatioAsync(wallpaperPath, function(ratio, width, height)
+      if width and height then
+         M.dimensionCache[wallpaperPath] = {width = width, height = height}
+         callback(width, height)
+      else
+         callback(nil, nil)
+      end
+   end)
+end
 
 -- Helper function to check if we need predictive preloading
 M.checkPredictivePreloading = function()
@@ -813,31 +881,6 @@ end -- of function
 
 M.ignoreCurrentWallpaper = function(s, reverse)
 
-
-   -- if M.galleryName == "HCG-R18" then
-
-   --    local md5 = getMD5(s.wallpaper)
-   --    if md5 ~= false then
-
-   --       local wall
-   --       if reverse then
-   --          wall = '0'
-   --       else
-   --          wall = '1'
-   --       end
-         
-   --       cmd = "sqlite3 " .. os.getenv("HOME") .. "/Pictures/database.db "
-   --          .. "'update MAIN_TBL set WALLPAPER=" .. wall .. ", CHECKED=1 where MD5="
-   --          .. '"' .. md5 .. '"' .. ";'"
-   --       awful.spawn.easy_async_with_shell(
-   --          cmd,
-   --          function (out)
-   --                local notiTextExtra = '\nMD5: ' .. md5
-   --                notiOnIgnore(s, reverse, notiTextExtra)
-   --          end
-   --       )
-   --    end
-   -- else -- for other folder w/o database
 	if not reverse then
 		os.rename(s.wallpaper, s.wallpaper .. ".ignore")
 		if s.currentIdx ~= nil then
@@ -851,60 +894,36 @@ M.ignoreCurrentWallpaper = function(s, reverse)
 		end
 	end
 	notiOnIgnore(s, reverse)
-   -- end -- end of if gallery
 
 end
-
--- M.copyMD5 = function(s)
-
---    local md5 = getMD5(s.wallpaper)
---    if md5 == nil then
---       naughty.notify(
---          { text   = "No MD5 Matched",
---            position = "bottom_left",
---            icon   = beautiful.refreshed,
---            icon_size = 64, screen = s,
---            width = notiWidth})
---    else
---       local cmd = "echo " .. '"' .. md5 .. '" ' .. " | xclip -selection c"
---       awful.spawn.easy_async_with_shell(
---          cmd,
---          function (out)
---             naughty.notify(
---                { text   = "MD5 copied to clipboard",
---                  position = "bottom_middle",
---                  icon   = beautiful.refreshed,
---                  icon_size = 64, screen = s,
---                  width = notiWidth})
---          end
---       )
---    end
-
--- end
 
 M.showWallpaperInfo = function(s)
 
    local curIdx
-   if s.currentIdx ~= nil then
+   if s.wallpaperRawIdx ~= nil then
+      curIdx = s.wallpaperRawIdx
+   elseif s.currentIdx ~= nil then
       curIdx = s.currentIdx
    else
       curIdx = 'n/a'
    end
 
-   -- local md5 = getMD5(s.wallpaper)
-   -- if md5 == nil then
-   --    md5 = "No matched"
-   -- end
-
-    naughty.notify(
-        { title  = "Wallpaper Info",
-          text   = "Filename: " .. s.wallpaper
-             .. '\nPath:  ' .. M.wallpaperPath
-             .. '\nIndex: ' .. curIdx .. " (" .. #M.filelist .. ")",
-             -- .. '\nMD5: ' .. md5
-             -- .. '\nTag: ' .. M.currentTag,
-          position = "bottom_left",
-          icon   = beautiful.refreshed, icon_size = 64, screen = s})
+   -- Get wallpaper dimensions asynchronously and show notification
+   M.getWallpaperDimensions(s.wallpaper, function(width, height)
+      local dimensionText = ""
+      if width and height then
+         dimensionText = '\nDimensions: ' .. width .. 'x' .. height
+      end
+      
+      naughty.notify(
+          { title  = "Wallpaper Info",
+            text   = "Filename: " .. s.wallpaper
+               .. '\nPath:  ' .. M.wallpaperPath
+               .. '\nIndex: ' .. curIdx .. " (" .. #M.filelist .. ")"
+               .. dimensionText,
+            position = "bottom_left",
+            icon   = beautiful.refreshed, icon_size = 64, screen = s})
+   end)
 end
 
 M.openWallpaperFile = function(s)
