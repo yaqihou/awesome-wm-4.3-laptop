@@ -149,7 +149,7 @@ M.populateRatioCaches = function(batchSize, callback)
          end
          
          -- Save cache after processing batch (non-blocking)
-         M.saveRatioCache()
+         M.saveRatioCache("auto")
          
          if callback then callback() end
       end
@@ -405,6 +405,8 @@ M.init = function()
       { "Update Wallpaper Files", function() M.updateFilelist() end},
       { "Change Wallpaper Interval", function() M.changeWallpaperInterval() end},
       { "Clear Wallpaper Cache", function() M.clearRatioCache() end},
+      { "Save Cache Now", function() M.saveRatioCache() end},
+      { "Show Cache Status", function() M.showCacheStatus() end},
       -- { "[DB Only] Set Tag", function() M.setTag() end}
    }
    
@@ -760,13 +762,30 @@ M.loadRatioCache = function(callback)
 		 
 		 if not success or not cache_data or not cache_data.version or not cache_data.cache then
 			-- Invalid cache format, start fresh
-			print("Invalid wallpaper ratio cache")
+			naughty.notify({
+			   title = "Wallpaper Cache",
+			   text = "Invalid cache format, starting fresh",
+			   position = "bottom_middle",
+			   icon = beautiful.refreshed,
+			   icon_size = 64,
+			   width = notiWidth
+			})
+			if callback then callback() end
 			return
 		 end
 		 
 		 -- Version check
 		 if cache_data.version ~= M.cacheVersion then
 			-- Version mismatch, start fresh
+			naughty.notify({
+			   title = "Wallpaper Cache",
+			   text = "Cache version mismatch, starting fresh",
+			   position = "bottom_middle",
+			   icon = beautiful.refreshed,
+			   icon_size = 64,
+			   width = notiWidth
+			})
+			if callback then callback() end
 			return
 		 end
 		 
@@ -787,11 +806,24 @@ M.loadRatioCache = function(callback)
 		 --    M.ratioCache = {}
 		 -- end
 		 
+		 -- Show successful load notification
+		 if validEntries > 0 then
+			naughty.notify({
+			   title = "Wallpaper Cache Loaded",
+			   text = "Loaded " .. validEntries .. " cached wallpaper ratios",
+			   position = "bottom_middle",
+			   icon = beautiful.refreshed,
+			   icon_size = 64,
+			   width = notiWidth,
+			   timeout = 3
+			})
+		 end
+		 
 		 if callback then callback() end
    end)
 end
 
-M.saveRatioCache = function()
+M.saveRatioCache = function(notificationStyle)
    -- Create cache data structure
    local cache_data = {
       version = M.cacheVersion,
@@ -837,6 +869,39 @@ M.saveRatioCache = function()
    
    -- Atomic move from temp file to actual file
    os.rename(temp_file_path, M.cacheFilePath)
+   
+   -- Show save notification based on style
+   if not M.suppressSaveNotification then
+      local cacheSize = 0
+      for _ in pairs(M.ratioCache) do
+         cacheSize = cacheSize + 1
+      end
+      
+      if notificationStyle == "auto" then
+         -- Auto-save: simple, short notification
+         naughty.notify({
+            title = "Cache Auto-saved",
+            text = cacheSize .. " entries",
+            position = "bottom_right",
+            icon = beautiful.refreshed,
+            icon_size = 32,
+            width = 200,
+            timeout = 1
+         })
+      elseif notificationStyle ~= "silent" then
+         -- Manual save: detailed notification (default)
+         naughty.notify({
+            title = "Wallpaper Cache Saved",
+            text = "Saved " .. cacheSize .. " cached wallpaper ratios",
+            position = "bottom_middle",
+            icon = beautiful.refreshed,
+            icon_size = 64,
+            width = notiWidth,
+            timeout = 2
+         })
+      end
+   end
+   
    return true
 end
 
@@ -864,11 +929,67 @@ M.cacheRatio = function(imagePath, ratio, width, height)
    end
    
    if cache_size % 50 == 0 then
-      M.saveRatioCache()
+      M.saveRatioCache("auto")
    end
 end
 
+M.showCacheStatus = function()
+   local cacheSize = 0
+   local portraitCount = 0
+   local landscapeCount = 0
+   
+   for _, entry in pairs(M.ratioCache) do
+      cacheSize = cacheSize + 1
+      if entry.ratio == "portrait" then
+         portraitCount = portraitCount + 1
+      else
+         landscapeCount = landscapeCount + 1
+      end
+   end
+   
+   local statusText = "Cache entries: " .. cacheSize
+   if cacheSize > 0 then
+      statusText = statusText .. "\nPortrait: " .. portraitCount .. " | Landscape: " .. landscapeCount
+      statusText = statusText .. "\nCache file: " .. M.cacheFilePath
+      
+      -- Calculate approximate file size
+      local fileSize = "Unknown"
+      local file = io.open(M.cacheFilePath, "r")
+      if file then
+         local size = file:seek("end")
+         file:close()
+         if size then
+            if size < 1024 then
+               fileSize = size .. " bytes"
+            elseif size < 1024*1024 then
+               fileSize = string.format("%.1f KB", size / 1024)
+            else
+               fileSize = string.format("%.1f MB", size / (1024*1024))
+            end
+         end
+      end
+      statusText = statusText .. "\nFile size: " .. fileSize
+   else
+      statusText = statusText .. "\nNo cached entries"
+   end
+   
+   naughty.notify({
+      title = "Wallpaper Ratio Cache Status",
+      text = statusText,
+      position = "bottom_middle",
+      icon = beautiful.refreshed,
+      icon_size = 64,
+      width = notiWidth,
+      timeout = 8
+   })
+end
+
 M.clearRatioCache = function()
+   local oldSize = 0
+   for _ in pairs(M.ratioCache) do
+      oldSize = oldSize + 1
+   end
+   
    -- Clear runtime cache
    M.ratioCache = {}
    
@@ -878,7 +999,7 @@ M.clearRatioCache = function()
    -- Show notification
    naughty.notify({ 
       title = "Wallpaper Cache Cleared",
-      text = "Persistent ratio cache has been cleared. Wallpaper ratios will be recalculated as needed.",
+      text = "Cleared " .. oldSize .. " cached entries. Wallpaper ratios will be recalculated as needed.",
       position = "bottom_middle",
       icon = beautiful.refreshed, 
       icon_size = 64,
@@ -887,8 +1008,8 @@ M.clearRatioCache = function()
 end
 
 M.saveRatioCacheOnExit = function()
-   -- Save cache before AwesomeWM exits
-   M.saveRatioCache()
+   -- Save cache before AwesomeWM exits (silent)
+   M.saveRatioCache("silent")
 end
 
 -- Helper function to check if we need predictive preloading
