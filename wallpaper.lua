@@ -156,8 +156,8 @@ M.populateRatioCaches = function(batchSize, callback)
             end
          end
          
-         -- Only save cache if we actually added new entries
-         if hasNewEntries then
+         -- Only save cache if we actually added new entries (for text cache mode)
+         if hasNewEntries and not M.useSQLiteCache then
             M.saveRatioCache("auto")
          end
          
@@ -366,8 +366,10 @@ M.init = function()
    -- Persistent ratio cache settings
    M.ratioCache = {}                -- Runtime cache: path -> {ratio, width, height, mtime}
    M.cacheFilePath = os.getenv("HOME") .. "/.config/awesome/wallpaper-ratio-cache.json"
-   M.cacheVersion = "1.0"
-   -- M.maxCacheEntries = 10000        -- Limit cache size
+   M.sqliteCachePath = os.getenv("HOME") .. "/.config/awesome/wallpaper-ratio-cache.sqlite3"
+   M.cacheVersion = "2.0"
+   M.useSQLiteCache = true          -- Use SQLite instead of JSON cache
+   M.sqliteConn = nil               -- SQLite connection object
 
    M.showDesktopStatus = false
    M.showDesktopBuffer = {}
@@ -415,10 +417,26 @@ M.init = function()
       { "Update Wallpaper Files", function() M.updateFilelist() end},
       { "Change Wallpaper Interval", function() M.changeWallpaperInterval() end},
       { "Clear Wallpaper Cache", function() M.clearRatioCache() end},
-      { "Save Cache Now", function() M.saveRatioCache() end},
       { "Show Cache Status", function() M.showCacheStatus() end},
-      -- { "[DB Only] Set Tag", function() M.setTag() end}
    }
+
+   -- Add SQLite-specific or text cache specific menu items
+   if M.useSQLiteCache then
+      table.insert(galleryActionMenu, { "Migrate Text Cache", function()
+         if M.sqliteConn then
+            M.migrateTextCacheToSQLite()
+         else
+            naughty.notify({
+               title = "Migration Error",
+               text = "SQLite cache not initialized",
+               position = "bottom_middle",
+               timeout = 3
+            })
+         end
+      end})
+   else
+      table.insert(galleryActionMenu, { "Save Cache Now", function() M.saveRatioCache() end})
+   end
    
    M.menu = awful.menu({
          items = {
@@ -430,9 +448,15 @@ M.init = function()
    })
    
    -- Load persistent ratio cache async, then toggle gallery
-   M.loadRatioCache(function()
-      M.toggleGallery(1)
-   end)
+   if M.useSQLiteCache then
+      M.loadRatioCacheSQLite(function()
+         M.toggleGallery(1)
+      end)
+   else
+      M.loadRatioCache(function()
+         M.toggleGallery(1)
+      end)
+   end
 
 end -- M.init
 
@@ -744,6 +768,390 @@ M.getWallpaperDimensions = function(wallpaperPath, callback)
    end)
 end
 
+-- SQLite Cache Functions
+M.initSQLiteCache = function()
+   if not M.useSQLiteCache then return false end
+
+   -- Load SQLite library
+   local success, luasql = pcall(require, "luasql.sqlite3")
+   if not success then
+      naughty.notify({
+         title = "SQLite Cache Error",
+         text = "Failed to load luasql.sqlite3. Falling back to text cache.",
+         position = "bottom_middle",
+         icon = beautiful.refreshed,
+         icon_size = 64,
+         width = notiWidth,
+         timeout = 5
+      })
+      M.useSQLiteCache = false
+      return false
+   end
+
+   local env = luasql.sqlite3()
+   M.sqliteConn = env:connect(M.sqliteCachePath)
+
+   if not M.sqliteConn then
+      M.useSQLiteCache = false
+      return false
+   end
+
+   -- Create table if it doesn't exist
+   local createSQL = [[
+      CREATE TABLE IF NOT EXISTS wallpaper_cache (
+         path TEXT PRIMARY KEY,
+         ratio TEXT NOT NULL,
+         width INTEGER NOT NULL,
+         height INTEGER NOT NULL,
+         mtime REAL NOT NULL,
+         created_at REAL DEFAULT (strftime('%s','now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ratio ON wallpaper_cache(ratio);
+      CREATE INDEX IF NOT EXISTS idx_mtime ON wallpaper_cache(mtime);
+   ]]
+
+   local result = M.sqliteConn:execute(createSQL)
+   if not result then
+      M.sqliteConn:close()
+      M.sqliteConn = nil
+      M.useSQLiteCache = false
+      return false
+   end
+
+   -- Enable WAL mode for better concurrent access
+   M.sqliteConn:execute("PRAGMA journal_mode=WAL;")
+   M.sqliteConn:execute("PRAGMA synchronous=NORMAL;")
+   M.sqliteConn:execute("PRAGMA cache_size=10000;")
+
+   return true
+end
+
+M.closeSQLiteCache = function()
+   if M.sqliteConn then
+      M.sqliteConn:close()
+      M.sqliteConn = nil
+   end
+end
+
+M.getCachedRatioSQLite = function(imagePath)
+   if not M.useSQLiteCache or not M.sqliteConn then
+      return nil, nil, nil
+   end
+
+   local escapedPath = M.sqliteConn:escape(imagePath)
+   local sql = "SELECT ratio, width, height FROM wallpaper_cache WHERE path = '" .. escapedPath .. "'"
+   local cursor = M.sqliteConn:execute(sql)
+   if not cursor then return nil, nil, nil end
+
+   local row = cursor:fetch({}, "a")
+   cursor:close()
+
+   if row then
+      return row.ratio, tonumber(row.width), tonumber(row.height)
+   end
+
+   return nil, nil, nil
+end
+
+M.cacheRatioSQLite = function(imagePath, ratio, width, height)
+   if not M.useSQLiteCache or not M.sqliteConn then
+      return false
+   end
+
+   local mtime = 0
+   local file_stat = io.popen("stat -c %Y '" .. imagePath .. "' 2>/dev/null")
+   if file_stat then
+      local mtime_str = file_stat:read("*l")
+      file_stat:close()
+      mtime = tonumber(mtime_str) or 0
+   end
+
+   -- Validate inputs
+   if not imagePath or not ratio or not width or not height then
+      return false
+   end
+
+   local success, result = pcall(function()
+      local escapedPath = M.sqliteConn:escape(imagePath)
+      local sql = string.format(
+         "INSERT OR REPLACE INTO wallpaper_cache (path, ratio, width, height, mtime) VALUES ('%s', '%s', %d, %d, %d)",
+         escapedPath, ratio, width, height, mtime)
+
+      return M.sqliteConn:execute(sql)
+   end)
+
+   if not success then
+      -- Log error details for debugging
+      naughty.notify({
+         title = "SQLite Error",
+         text = "Cache insert failed: " .. (result or "unknown error"),
+         position = "bottom_right",
+         timeout = 3,
+         width = 400
+      })
+      return false
+   end
+
+   return result ~= nil
+end
+
+M.loadRatioCacheSQLite = function(callback)
+   if not M.useSQLiteCache then
+      if callback then callback() end
+      return
+   end
+
+   if not M.initSQLiteCache() then
+      -- Fall back to text cache
+      M.loadRatioCache(callback)
+      return
+   end
+
+   -- Check if SQLite database is empty and text cache exists (first-time migration)
+   local countCursor = M.sqliteConn:execute("SELECT COUNT(*) as count FROM wallpaper_cache")
+   local sqliteCount = 0
+   if countCursor then
+      local row = countCursor:fetch({}, "a")
+      if row then sqliteCount = tonumber(row.count) or 0 end
+      countCursor:close()
+   end
+
+   -- If SQLite is empty but text cache exists, migrate it
+   if sqliteCount == 0 then
+      local textCacheFile = io.open(M.cacheFilePath, "r")
+      if textCacheFile then
+         textCacheFile:close()
+         naughty.notify({
+            title = "Migrating Cache",
+            text = "Converting text cache to SQLite format...",
+            position = "bottom_middle",
+            icon = beautiful.refreshed,
+            icon_size = 64,
+            width = notiWidth,
+            timeout = 3
+         })
+
+         M.migrateTextCacheToSQLite(function(success, message)
+            if success then
+               -- After successful migration, load the cache
+               M.loadRatioCacheSQLite(callback)
+            else
+               -- Migration failed, continue with empty cache
+               if callback then callback() end
+            end
+         end)
+         return
+      end
+   end
+
+   -- Load all cached entries into runtime cache for compatibility
+   local sql = "SELECT path, ratio, width, height FROM wallpaper_cache"
+   local cursor = M.sqliteConn:execute(sql)
+   if not cursor then
+      if callback then callback() end
+      return
+   end
+
+   local count = 0
+   local row = cursor:fetch({}, "a")
+   while row do
+      M.ratioCache[row.path] = {
+         ratio = row.ratio,
+         width = tonumber(row.width),
+         height = tonumber(row.height)
+      }
+      count = count + 1
+      row = cursor:fetch({}, "a")
+   end
+   cursor:close()
+
+   if count > 0 then
+      naughty.notify({
+         title = "SQLite Wallpaper Cache Loaded",
+         text = "Loaded " .. count .. " cached wallpaper ratios",
+         position = "bottom_middle",
+         icon = beautiful.refreshed,
+         icon_size = 64,
+         width = notiWidth,
+         timeout = 3
+      })
+   end
+
+   if callback then callback() end
+end
+
+M.showCacheStatusSQLite = function()
+   if not M.useSQLiteCache or not M.sqliteConn then
+      M.showCacheStatus()
+      return
+   end
+
+   local cursor = M.sqliteConn:execute([[
+      SELECT
+         COUNT(*) as total,
+         SUM(CASE WHEN ratio = 'portrait' THEN 1 ELSE 0 END) as portrait,
+         SUM(CASE WHEN ratio = 'landscape' THEN 1 ELSE 0 END) as landscape
+      FROM wallpaper_cache
+   ]])
+
+   if not cursor then
+      M.showCacheStatus()
+      return
+   end
+
+   local row = cursor:fetch({}, "a")
+   cursor:close()
+
+   if not row then
+      M.showCacheStatus()
+      return
+   end
+
+   local total = tonumber(row.total) or 0
+   local portrait = tonumber(row.portrait) or 0
+   local landscape = tonumber(row.landscape) or 0
+
+   local statusText = "SQLite Cache entries: " .. total
+   if total > 0 then
+      statusText = statusText .. "\nPortrait: " .. portrait .. " | Landscape: " .. landscape
+      statusText = statusText .. "\nDatabase: " .. M.sqliteCachePath
+
+      -- Get file size
+      local fileSize = "Unknown"
+      local file = io.popen("ls -lh '" .. M.sqliteCachePath .. "' 2>/dev/null | awk '{print $5}'")
+      if file then
+         fileSize = file:read("*l") or "Unknown"
+         file:close()
+      end
+      statusText = statusText .. "\nFile size: " .. fileSize
+   else
+      statusText = statusText .. "\nNo cached entries"
+   end
+
+   naughty.notify({
+      title = "SQLite Wallpaper Cache Status",
+      text = statusText,
+      position = "bottom_middle",
+      icon = beautiful.refreshed,
+      icon_size = 64,
+      width = notiWidth,
+      timeout = 8
+   })
+end
+
+M.clearRatioCacheSQLite = function()
+   if not M.useSQLiteCache or not M.sqliteConn then
+      M.clearRatioCache()
+      return
+   end
+
+   -- Get count before clearing
+   local cursor = M.sqliteConn:execute("SELECT COUNT(*) as count FROM wallpaper_cache")
+   local oldSize = 0
+   if cursor then
+      local row = cursor:fetch({}, "a")
+      if row then oldSize = tonumber(row.count) or 0 end
+      cursor:close()
+   end
+
+   -- Clear database
+   M.sqliteConn:execute("DELETE FROM wallpaper_cache")
+   M.sqliteConn:execute("VACUUM")
+
+   -- Clear runtime cache
+   M.ratioCache = {}
+
+   naughty.notify({
+      title = "SQLite Wallpaper Cache Cleared",
+      text = "Cleared " .. oldSize .. " cached entries. Wallpaper ratios will be recalculated as needed.",
+      position = "bottom_middle",
+      icon = beautiful.refreshed,
+      icon_size = 64,
+      width = notiWidth
+   })
+end
+
+M.migrateTextCacheToSQLite = function(callback)
+   if not M.useSQLiteCache or not M.sqliteConn then
+      if callback then callback(false, "SQLite not available") end
+      return
+   end
+
+   -- Check if text cache file exists
+   local file = io.open(M.cacheFilePath, "r")
+   if not file then
+      if callback then callback(false, "No text cache found") end
+      return
+   end
+
+   local content = file:read("*all")
+   file:close()
+
+   if not content or content == "" then
+      if callback then callback(false, "Text cache is empty") end
+      return
+   end
+
+   -- Parse the text cache (similar to existing loadRatioCache)
+   local success, cache_data = pcall(function()
+      local loadstring_func = loadstring or load
+      local func = loadstring_func("return " .. content)
+      if func then
+         return func()
+      end
+      return nil
+   end)
+
+   if not success or not cache_data or not cache_data.cache then
+      if callback then callback(false, "Failed to parse text cache") end
+      return
+   end
+
+   -- Import entries into SQLite
+   local imported = 0
+   local failed = 0
+
+   M.sqliteConn:execute("BEGIN TRANSACTION")
+
+   for filePath, entry in pairs(cache_data.cache) do
+      if type(filePath) == "string" and type(entry) == "table" and
+         entry.ratio and entry.width and entry.height then
+
+         local success = M.cacheRatioSQLite(filePath, entry.ratio, entry.width, entry.height)
+         if success then
+            imported = imported + 1
+         else
+            failed = failed + 1
+         end
+      else
+         failed = failed + 1
+      end
+   end
+
+   M.sqliteConn:execute("COMMIT")
+
+   -- Backup the original text cache
+   os.rename(M.cacheFilePath, M.cacheFilePath .. ".migrated.backup")
+
+   local message = "Migration complete: " .. imported .. " entries imported"
+   if failed > 0 then
+      message = message .. ", " .. failed .. " failed"
+   end
+
+   naughty.notify({
+      title = "Cache Migration Complete",
+      text = message .. "\nOriginal cache backed up as .migrated.backup",
+      position = "bottom_middle",
+      icon = beautiful.refreshed,
+      icon_size = 64,
+      width = notiWidth,
+      timeout = 5
+   })
+
+   if callback then callback(true, message) end
+end
+
 -- Persistent ratio cache functions
 M.loadRatioCache = function(callback)
    local cmd = "cat '" .. M.cacheFilePath .. "' 2>/dev/null"
@@ -762,6 +1170,15 @@ M.loadRatioCache = function(callback)
 		 -- Simple JSON parsing for cache structure
 		 local success, cache_data = pcall(function()
 			   -- Use a simple JSON-like format that's safe for Lua
+			   naughty.notify({
+					 title = "Wallpaper Cache loading in progress",
+					 text = "Loading cached wallpaper ratios from " .. M.cacheFilePath,
+					 position = "bottom_middle",
+					 icon = beautiful.refreshed,
+					 icon_size = 64,
+					 width = notiWidth,
+					 timeout = 3
+			   })
 			   local loadstring_func = loadstring or load
 			   local func = loadstring_func("return " .. content)
 			   if func then
@@ -916,34 +1333,82 @@ M.saveRatioCache = function(notificationStyle)
 end
 
 M.getCachedRatio = function(imagePath)
+   -- Try SQLite cache first
+   if M.useSQLiteCache then
+      local ratio, width, height = M.getCachedRatioSQLite(imagePath)
+      if ratio then
+         return ratio, width, height
+      end
+   end
+
+   -- Fall back to runtime cache
    local entry = M.ratioCache[imagePath]
    if not entry then
       return nil, nil, nil
    end
-   
+
    return entry.ratio, entry.width, entry.height
 end
 
 M.cacheRatio = function(imagePath, ratio, width, height)
-   
+   -- Cache in SQLite if available
+   if M.useSQLiteCache then
+      if M.sqliteConn then
+         local success = M.cacheRatioSQLite(imagePath, ratio, width, height)
+         if not success then
+            -- SQLite caching failed, show debug info
+            naughty.notify({
+               title = "SQLite Cache Warning",
+               text = "Failed to cache: " .. (imagePath and imagePath:match("[^/]*$") or "unknown"),
+               position = "bottom_right",
+               timeout = 2,
+               width = 300
+            })
+         end
+      else
+         -- SQLite not connected, try to reconnect
+         if not M.initSQLiteCache() then
+            -- Fall back to text mode for this session
+            M.useSQLiteCache = false
+            naughty.notify({
+               title = "SQLite Cache Error",
+               text = "SQLite unavailable, falling back to text cache",
+               position = "bottom_middle",
+               timeout = 5,
+               width = notiWidth
+            })
+         else
+            -- Retry caching after successful reconnection
+            M.cacheRatioSQLite(imagePath, ratio, width, height)
+         end
+      end
+   end
+
+   -- Also cache in runtime cache for compatibility
    M.ratioCache[imagePath] = {
       ratio = ratio,
       width = width,
       height = height,
    }
-   
-   -- Periodically save cache (every 50 new entries)
-   local cache_size = 0
-   for _ in pairs(M.ratioCache) do
-      cache_size = cache_size + 1
-   end
-   
-   if cache_size % 50 == 0 then
-      M.saveRatioCache("auto")
+
+   -- For text cache, periodically save (every 50 new entries)
+   if not M.useSQLiteCache then
+      local cache_size = 0
+      for _ in pairs(M.ratioCache) do
+         cache_size = cache_size + 1
+      end
+
+      if cache_size % 50 == 0 then
+         M.saveRatioCache("auto")
+      end
    end
 end
 
 M.showCacheStatus = function()
+   if M.useSQLiteCache then
+      M.showCacheStatusSQLite()
+      return
+   end
    local cacheSize = 0
    local portraitCount = 0
    local landscapeCount = 0
@@ -995,6 +1460,10 @@ M.showCacheStatus = function()
 end
 
 M.clearRatioCache = function()
+   if M.useSQLiteCache then
+      M.clearRatioCacheSQLite()
+      return
+   end
    local oldSize = 0
    for _ in pairs(M.ratioCache) do
       oldSize = oldSize + 1
@@ -1018,8 +1487,13 @@ M.clearRatioCache = function()
 end
 
 M.saveRatioCacheOnExit = function()
-   -- Save cache before AwesomeWM exits (silent)
-   M.saveRatioCache("silent")
+   if M.useSQLiteCache then
+      -- SQLite cache is auto-saved, just close connection
+      M.closeSQLiteCache()
+   else
+      -- Save text cache before AwesomeWM exits (silent)
+      M.saveRatioCache("silent")
+   end
 end
 
 -- Helper function to check if we need predictive preloading
@@ -1398,6 +1872,6 @@ M.keybindings = awful.util.table.join(
 )
 
 -- Save cache when AwesomeWM is about to exit (can be called from main rc.lua)
-awesome.connect_signal("exit", M.saveRatioCacheOnExit)
+-- awesome.connect_signal("exit", M.saveRatioCacheOnExit)
 
 return M
