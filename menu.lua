@@ -6,6 +6,7 @@ local beautiful     = require("beautiful")
 
 local wallpaper = require("wallpaper")
 local myutils = require("myutils")
+local vlc_focus_mute = require("vlc_focus_mute")
 
 M = {}
 
@@ -60,15 +61,14 @@ local servicemenu = {
 }
 
 local scriptmenu = awful.menu{
-   { "Toggle tg download [media viewer]",
-     "/home/yaqi/.local/bin/maux-toggle-tg-download 0"
+   {
+	  "Toggle VLC Unmute-on-focus for current tag",
+	  function () vlc_focus_mute.toggle() end,
    },
-   { "Toggle tg download [all icons]",
-     "/home/yaqi/.local/bin/maux-toggle-tg-download 1"
+   {
+	  "Refresh VLC Unmute-on-focus PID list",
+	  function () vlc_focus_mute.refresh() end,
    },
-   { "Toggle tg download [all icons] - Confirm",
-     "/home/yaqi/.local/bin/maux-toggle-tg-download 2"
-   }
 }
 
 local mainmenu = awful.menu{

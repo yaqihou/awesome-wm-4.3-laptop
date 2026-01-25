@@ -151,33 +151,6 @@ M.populateRatioCaches = function(batchSize, callback)
    end
 end
 
--- Legacy sync version (kept for backward compatibility but deprecated)
-M.populateRatioCachesSync = function(batchSize)
-   if not M.ratioBasedSelection or M.unprocessedCount == 0 then
-      return
-   end
-   
-   batchSize = batchSize or 10  -- Process 10 images at a time by default
-   local processed = 0
-   
-   while processed < batchSize and M.processedIdx <= #M.filelist do
-      local wallpaper = M.filelist[M.processedIdx]
-      if wallpaper and wallpaper ~= "" then
-         local ratio = M.getImageRatio(wallpaper)
-         if ratio == "portrait" then
-            table.insert(M.portraitList, {path = wallpaper, rawIdx = M.processedIdx})
-         elseif ratio == "landscape" then
-            table.insert(M.landscapeList, {path = wallpaper, rawIdx = M.processedIdx})
-         else
-            -- For unknown ratios, add to landscape as fallback
-            table.insert(M.landscapeList, {path = wallpaper, rawIdx = M.processedIdx})
-         end
-         processed = processed + 1
-      end
-      M.processedIdx = M.processedIdx + 1
-      M.unprocessedCount = M.unprocessedCount - 1
-   end
-end
 
 -- Async version of getNextWallpaperByRatio (recommended for performance)
 -- callback(wallpaper, rawIdx, actualRatio) - actualRatio indicates which orientation was actually used
@@ -255,65 +228,38 @@ M.getNextWallpaperByRatioAsync = function(desiredRatio, callback)
    tryNextBatch()
 end
 
--- Synchronous version (for backward compatibility, but uses blocking operations)  
+-- Simplified sync version (deprecated - use async version)
 -- Returns: wallpaper, rawIdx, actualRatio - actualRatio indicates which orientation was actually used
 M.getNextWallpaperByRatio = function(desiredRatio)
    if not M.ratioBasedSelection then
       return nil, nil, nil
    end
-   
+
    local targetList, targetIdx
-   local actualRatio = desiredRatio  -- Track which orientation we actually use
+   local actualRatio = desiredRatio
    if desiredRatio == "portrait" then
       targetList = M.portraitList
       targetIdx = M.portraitIdx
    else
-      targetList = M.landscapeList  
+      targetList = M.landscapeList
       targetIdx = M.landscapeIdx
    end
-   
-   -- Multi-batch search using sync version for compatibility
-   local maxSearchAttempts = M.maxSearchAttempts or 5
-   local searchAttempts = 0
-   
-   while targetIdx > #targetList and M.unprocessedCount > 0 and searchAttempts < maxSearchAttempts do
-      M.populateRatioCachesSync(10)  -- Use sync version to maintain API compatibility
-      searchAttempts = searchAttempts + 1
-   end
-   
-   -- Handle different cases after search attempts
-   if targetIdx > #targetList then
-      if #targetList > 0 then
-         -- Case 1: Target list has wallpapers but we've cycled through all - cycle back to start
-         if desiredRatio == "portrait" then
-            -- If there are still more to process, we can wait before cycling back to start
-            if M.unprocessedCount == 0 then M.portraitIdx = 1 else M.portraitIdx = #targetList end
-            targetIdx = M.portraitIdx
-         else
-            if M.unprocessedCount == 0 then M.landscapeIdx = 1 else M.landscapeIdx = #targetList end
-            targetIdx = M.landscapeIdx
-         end
-      else
-         -- Case 2: Target list is empty - fall back to other orientation
-         if desiredRatio == "portrait" and #M.landscapeList > 0 then
-            targetList = M.landscapeList
-            targetIdx = M.landscapeIdx
-            actualRatio = "landscape"  -- Update actual orientation used
-         elseif desiredRatio == "landscape" and #M.portraitList > 0 then
-            targetList = M.portraitList
-            targetIdx = M.portraitIdx
-            actualRatio = "portrait"  -- Update actual orientation used
-         else
-            return nil, nil, nil
-         end
-      end
-   end
-   
+
+   -- If we have wallpapers available, return one
    if targetIdx <= #targetList then
       local wallpaperInfo = targetList[targetIdx]
       return wallpaperInfo.path, wallpaperInfo.rawIdx, actualRatio
    end
-   
+
+   -- If target list is empty, try fallback orientation
+   if desiredRatio == "portrait" and #M.landscapeList > 0 and M.landscapeIdx <= #M.landscapeList then
+      local wallpaperInfo = M.landscapeList[M.landscapeIdx]
+      return wallpaperInfo.path, wallpaperInfo.rawIdx, "landscape"
+   elseif desiredRatio == "landscape" and #M.portraitList > 0 and M.portraitIdx <= #M.portraitList then
+      local wallpaperInfo = M.portraitList[M.portraitIdx]
+      return wallpaperInfo.path, wallpaperInfo.rawIdx, "portrait"
+   end
+
    return nil, nil, nil
 end
 
