@@ -65,25 +65,6 @@ M.getImageRatioAsync = function(imagePath, callback)
    end)
 end
 
--- Legacy sync function (kept for backward compatibility, but deprecated)
-M.getImageRatio = function(imagePath)
-   -- DEPRECATED: This function blocks awesome WM. Use getImageRatioAsync instead.
-   local handle = io.popen("identify -ping -format '%w %h' '" .. imagePath .. "' 2>/dev/null")
-   if not handle then return "unknown" end
-   
-   local result = handle:read("*a")
-   handle:close()
-   
-   local width, height = result:match("(%d+) (%d+)")
-   if not width or not height then return "unknown" end
-   
-   width, height = tonumber(width), tonumber(height)
-   if width < height then
-      return "portrait"
-   else
-      return "landscape"
-   end
-end
 
 -- Async lazy loading function to populate ratio-based caches
 M.populateRatioCaches = function(batchSize, callback)
@@ -156,10 +137,7 @@ M.populateRatioCaches = function(batchSize, callback)
             end
          end
          
-         -- Only save cache if we actually added new entries (for text cache mode)
-         if hasNewEntries and not M.useSQLiteCache then
-            M.saveRatioCache("auto")
-         end
+         -- SQLite entries are auto-saved individually, no batch save needed
          
          if callback then callback() end
       end
@@ -364,11 +342,10 @@ M.init = function()
    M.dimensionCache = {}
    
    -- Persistent ratio cache settings
-   M.ratioCache = {}                -- Runtime cache: path -> {ratio, width, height, mtime}
-   M.cacheFilePath = os.getenv("HOME") .. "/.config/awesome/wallpaper-ratio-cache.json"
+   M.ratioCache = {}                -- Runtime cache: path -> {ratio, width, height}
    M.sqliteCachePath = os.getenv("HOME") .. "/.config/awesome/wallpaper-ratio-cache.sqlite3"
-   M.cacheVersion = "2.0"
-   M.useSQLiteCache = true          -- Use SQLite instead of JSON cache
+   M.journalPath = os.getenv("HOME") .. "/.config/awesome/wallpaper-ratio-cache.journal"
+   M.useSQLiteCache = true          -- Always use SQLite
    M.sqliteConn = nil               -- SQLite connection object
 
    M.showDesktopStatus = false
@@ -420,23 +397,6 @@ M.init = function()
       { "Show Cache Status", function() M.showCacheStatus() end},
    }
 
-   -- Add SQLite-specific or text cache specific menu items
-   if M.useSQLiteCache then
-      table.insert(galleryActionMenu, { "Migrate Text Cache", function()
-         if M.sqliteConn then
-            M.migrateTextCacheToSQLite()
-         else
-            naughty.notify({
-               title = "Migration Error",
-               text = "SQLite cache not initialized",
-               position = "bottom_middle",
-               timeout = 3
-            })
-         end
-      end})
-   else
-      table.insert(galleryActionMenu, { "Save Cache Now", function() M.saveRatioCache() end})
-   end
    
    M.menu = awful.menu({
          items = {
@@ -448,15 +408,9 @@ M.init = function()
    })
    
    -- Load persistent ratio cache async, then toggle gallery
-   if M.useSQLiteCache then
-      M.loadRatioCacheSQLite(function()
-         M.toggleGallery(1)
-      end)
-   else
-      M.loadRatioCache(function()
-         M.toggleGallery(1)
-      end)
-   end
+   M.loadRatioCacheSQLite(function()
+      M.toggleGallery(1)
+   end)
 
 end -- M.init
 
@@ -802,17 +756,15 @@ M.initSQLiteCache = function()
          path TEXT PRIMARY KEY,
          ratio TEXT NOT NULL,
          width INTEGER NOT NULL,
-         height INTEGER NOT NULL,
-         mtime REAL NOT NULL,
-         created_at REAL DEFAULT (strftime('%s','now'))
+         height INTEGER NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_ratio ON wallpaper_cache(ratio);
-      CREATE INDEX IF NOT EXISTS idx_mtime ON wallpaper_cache(mtime);
    ]]
 
    local result = M.sqliteConn:execute(createSQL)
    if not result then
+	  print("Failed to execute creatSQL statement")
       M.sqliteConn:close()
       M.sqliteConn = nil
       M.useSQLiteCache = false
@@ -859,14 +811,6 @@ M.cacheRatioSQLite = function(imagePath, ratio, width, height)
       return false
    end
 
-   local mtime = 0
-   local file_stat = io.popen("stat -c %Y '" .. imagePath .. "' 2>/dev/null")
-   if file_stat then
-      local mtime_str = file_stat:read("*l")
-      file_stat:close()
-      mtime = tonumber(mtime_str) or 0
-   end
-
    -- Validate inputs
    if not imagePath or not ratio or not width or not height then
       return false
@@ -875,8 +819,8 @@ M.cacheRatioSQLite = function(imagePath, ratio, width, height)
    local success, result = pcall(function()
       local escapedPath = M.sqliteConn:escape(imagePath)
       local sql = string.format(
-         "INSERT OR REPLACE INTO wallpaper_cache (path, ratio, width, height, mtime) VALUES ('%s', '%s', %d, %d, %d)",
-         escapedPath, ratio, width, height, mtime)
+         "INSERT OR REPLACE INTO wallpaper_cache (path, ratio, width, height) VALUES ('%s', '%s', %d, %d)",
+         escapedPath, ratio, width, height)
 
       return M.sqliteConn:execute(sql)
    end)
@@ -896,55 +840,7 @@ M.cacheRatioSQLite = function(imagePath, ratio, width, height)
    return result ~= nil
 end
 
-M.loadRatioCacheSQLite = function(callback)
-   if not M.useSQLiteCache then
-      if callback then callback() end
-      return
-   end
-
-   if not M.initSQLiteCache() then
-      -- Fall back to text cache
-      M.loadRatioCache(callback)
-      return
-   end
-
-   -- Check if SQLite database is empty and text cache exists (first-time migration)
-   local countCursor = M.sqliteConn:execute("SELECT COUNT(*) as count FROM wallpaper_cache")
-   local sqliteCount = 0
-   if countCursor then
-      local row = countCursor:fetch({}, "a")
-      if row then sqliteCount = tonumber(row.count) or 0 end
-      countCursor:close()
-   end
-
-   -- If SQLite is empty but text cache exists, migrate it
-   if sqliteCount == 0 then
-      local textCacheFile = io.open(M.cacheFilePath, "r")
-      if textCacheFile then
-         textCacheFile:close()
-         naughty.notify({
-            title = "Migrating Cache",
-            text = "Converting text cache to SQLite format...",
-            position = "bottom_middle",
-            icon = beautiful.refreshed,
-            icon_size = 64,
-            width = notiWidth,
-            timeout = 3
-         })
-
-         M.migrateTextCacheToSQLite(function(success, message)
-            if success then
-               -- After successful migration, load the cache
-               M.loadRatioCacheSQLite(callback)
-            else
-               -- Migration failed, continue with empty cache
-               if callback then callback() end
-            end
-         end)
-         return
-      end
-   end
-
+M.loadRatioCacheSQLiteInternal = function(callback)
    -- Load all cached entries into runtime cache for compatibility
    local sql = "SELECT path, ratio, width, height FROM wallpaper_cache"
    local cursor = M.sqliteConn:execute(sql)
@@ -966,24 +862,59 @@ M.loadRatioCacheSQLite = function(callback)
    end
    cursor:close()
 
-   if count > 0 then
-      naughty.notify({
-         title = "SQLite Wallpaper Cache Loaded",
-         text = "Loaded " .. count .. " cached wallpaper ratios",
-         position = "bottom_middle",
-         icon = beautiful.refreshed,
-         icon_size = 64,
-         width = notiWidth,
-         timeout = 3
-      })
+   -- Process any pending journal entries
+   M.processJournal(function(processed, failed)
+      local totalCount = count + processed
+
+      if totalCount > 0 then
+         naughty.notify({
+            title = "SQLite Wallpaper Cache Loaded",
+            text = "Loaded " .. totalCount .. " cached wallpaper ratios" ..
+                   (processed > 0 and " (+" .. processed .. " from journal)" or ""),
+            position = "bottom_middle",
+            icon = beautiful.refreshed,
+            icon_size = 64,
+            width = notiWidth,
+            timeout = 3
+         })
+      end
+
+      if callback then callback() end
+   end)
+end
+
+M.loadRatioCacheSQLite = function(callback)
+   if not M.useSQLiteCache then
+      if callback then callback() end
+      return
    end
 
-   if callback then callback() end
+   if not M.initSQLiteCache() then
+      -- SQLite failed to initialize, continue with empty cache
+      naughty.notify({
+         title = "SQLite Cache Error",
+         text = "Failed to initialize SQLite cache. Starting with empty cache.",
+         position = "bottom_middle",
+         timeout = 5,
+         width = notiWidth
+      })
+      if callback then callback() end
+      return
+   end
+
+   -- Load cache and process journal
+   M.loadRatioCacheSQLiteInternal(callback)
 end
 
 M.showCacheStatusSQLite = function()
    if not M.useSQLiteCache or not M.sqliteConn then
-      M.showCacheStatus()
+      naughty.notify({
+         title = "SQLite Cache Status",
+         text = "SQLite cache not initialized",
+         position = "bottom_middle",
+         timeout = 5,
+         width = notiWidth
+      })
       return
    end
 
@@ -996,7 +927,13 @@ M.showCacheStatusSQLite = function()
    ]])
 
    if not cursor then
-      M.showCacheStatus()
+      naughty.notify({
+         title = "SQLite Cache Status",
+         text = "Failed to query cache database",
+         position = "bottom_middle",
+         timeout = 5,
+         width = notiWidth
+      })
       return
    end
 
@@ -1004,13 +941,29 @@ M.showCacheStatusSQLite = function()
    cursor:close()
 
    if not row then
-      M.showCacheStatus()
+      naughty.notify({
+         title = "SQLite Cache Status",
+         text = "Failed to read cache statistics",
+         position = "bottom_middle",
+         timeout = 5,
+         width = notiWidth
+      })
       return
    end
 
    local total = tonumber(row.total) or 0
    local portrait = tonumber(row.portrait) or 0
    local landscape = tonumber(row.landscape) or 0
+
+   -- Check journal size
+   local journalCount = 0
+   local journalFile = io.open(M.journalPath, "r")
+   if journalFile then
+      for _ in journalFile:lines() do
+         journalCount = journalCount + 1
+      end
+      journalFile:close()
+   end
 
    local statusText = "SQLite Cache entries: " .. total
    if total > 0 then
@@ -1024,9 +977,13 @@ M.showCacheStatusSQLite = function()
          fileSize = file:read("*l") or "Unknown"
          file:close()
       end
-      statusText = statusText .. "\nFile size: " .. fileSize
+      statusText = statusText .. "\nDB size: " .. fileSize
    else
       statusText = statusText .. "\nNo cached entries"
+   end
+
+   if journalCount > 0 then
+      statusText = statusText .. "\nJournal: " .. journalCount .. " pending entries"
    end
 
    naughty.notify({
@@ -1042,7 +999,13 @@ end
 
 M.clearRatioCacheSQLite = function()
    if not M.useSQLiteCache or not M.sqliteConn then
-      M.clearRatioCache()
+      naughty.notify({
+         title = "SQLite Cache Error",
+         text = "SQLite cache not initialized",
+         position = "bottom_middle",
+         timeout = 3,
+         width = notiWidth
+      })
       return
    end
 
@@ -1072,55 +1035,47 @@ M.clearRatioCacheSQLite = function()
    })
 end
 
-M.migrateTextCacheToSQLite = function(callback)
-   if not M.useSQLiteCache or not M.sqliteConn then
-      if callback then callback(false, "SQLite not available") end
-      return
-   end
+-- Simple Journal Functions for SQLite fallback
+M.writeToJournal = function(imagePath, ratio, width, height)
+   local journalEntry = imagePath .. "|" .. ratio .. "|" .. width .. "|" .. height .. "\n"
 
-   -- Check if text cache file exists
-   local file = io.open(M.cacheFilePath, "r")
+   local file = io.open(M.journalPath, "a")
+   if file then
+      file:write(journalEntry)
+      file:close()
+      return true
+   end
+   return false
+end
+
+M.processJournal = function(callback)
+   local file = io.open(M.journalPath, "r")
    if not file then
-      if callback then callback(false, "No text cache found") end
+      if callback then callback(0, 0) end
       return
    end
 
-   local content = file:read("*all")
-   file:close()
-
-   if not content or content == "" then
-      if callback then callback(false, "Text cache is empty") end
-      return
-   end
-
-   -- Parse the text cache (similar to existing loadRatioCache)
-   local success, cache_data = pcall(function()
-      local loadstring_func = loadstring or load
-      local func = loadstring_func("return " .. content)
-      if func then
-         return func()
-      end
-      return nil
-   end)
-
-   if not success or not cache_data or not cache_data.cache then
-      if callback then callback(false, "Failed to parse text cache") end
-      return
-   end
-
-   -- Import entries into SQLite
-   local imported = 0
+   local processed = 0
    local failed = 0
 
-   M.sqliteConn:execute("BEGIN TRANSACTION")
+   if M.sqliteConn then
+      M.sqliteConn:execute("BEGIN TRANSACTION")
+   end
 
-   for filePath, entry in pairs(cache_data.cache) do
-      if type(filePath) == "string" and type(entry) == "table" and
-         entry.ratio and entry.width and entry.height then
+   for line in file:lines() do
+      local parts = {}
+      for part in line:gmatch("([^|]+)") do
+         table.insert(parts, part)
+      end
 
-         local success = M.cacheRatioSQLite(filePath, entry.ratio, entry.width, entry.height)
-         if success then
-            imported = imported + 1
+      if #parts >= 4 then
+         local path, ratio, width, height = parts[1], parts[2], tonumber(parts[3]), tonumber(parts[4])
+         if path and ratio and width and height then
+            if M.cacheRatioSQLite(path, ratio, width, height) then
+               processed = processed + 1
+            else
+               failed = failed + 1
+            end
          else
             failed = failed + 1
          end
@@ -1129,208 +1084,46 @@ M.migrateTextCacheToSQLite = function(callback)
       end
    end
 
-   M.sqliteConn:execute("COMMIT")
-
-   -- Backup the original text cache
-   os.rename(M.cacheFilePath, M.cacheFilePath .. ".migrated.backup")
-
-   local message = "Migration complete: " .. imported .. " entries imported"
-   if failed > 0 then
-      message = message .. ", " .. failed .. " failed"
+   if M.sqliteConn then
+      M.sqliteConn:execute("COMMIT")
    end
 
-   naughty.notify({
-      title = "Cache Migration Complete",
-      text = message .. "\nOriginal cache backed up as .migrated.backup",
-      position = "bottom_middle",
-      icon = beautiful.refreshed,
-      icon_size = 64,
-      width = notiWidth,
-      timeout = 5
-   })
+   file:close()
 
-   if callback then callback(true, message) end
+   -- If all entries were processed successfully, clear the journal
+   if failed == 0 and processed > 0 then
+      os.remove(M.journalPath)
+      naughty.notify({
+         title = "Journal Processed",
+         text = "Recovered " .. processed .. " entries from journal",
+         position = "bottom_middle",
+         icon = beautiful.refreshed,
+         icon_size = 64,
+         width = notiWidth,
+         timeout = 3
+      })
+   elseif processed > 0 then
+      naughty.notify({
+         title = "Journal Partially Processed",
+         text = "Recovered " .. processed .. " entries, " .. failed .. " failed",
+         position = "bottom_middle",
+         icon = beautiful.refreshed,
+         icon_size = 64,
+         width = notiWidth,
+         timeout = 5
+      })
+   end
+
+   if callback then callback(processed, failed) end
 end
+
+M.clearJournal = function()
+   os.remove(M.journalPath)
+end
+
 
 -- Persistent ratio cache functions
-M.loadRatioCache = function(callback)
-   local cmd = "cat '" .. M.cacheFilePath .. "' 2>/dev/null"
-   
-   awful.spawn.easy_async_with_shell(
-	  cmd,
-	  function(stdout, stderr, exitreason, exitcode)
-		 if exitcode ~= 0 or not stdout or stdout == "" then
-			-- Cache file doesn't exist or empty, start with empty cache
-			if callback then callback() end
-			return
-		 end
-		 
-		 local content = stdout
-		 
-		 -- Simple JSON parsing for cache structure
-		 local success, cache_data = pcall(function()
-			   -- Use a simple JSON-like format that's safe for Lua
-			   naughty.notify({
-					 title = "Wallpaper Cache loading in progress",
-					 text = "Loading cached wallpaper ratios from " .. M.cacheFilePath,
-					 position = "bottom_middle",
-					 icon = beautiful.refreshed,
-					 icon_size = 64,
-					 width = notiWidth,
-					 timeout = 3
-			   })
-			   local loadstring_func = loadstring or load
-			   local func = loadstring_func("return " .. content)
-			   if func then
-				  return func()
-			   end
-			   return nil
-		 end)
-		 
-		 if not success or not cache_data or not cache_data.version or not cache_data.cache then
-			-- Invalid cache format, start fresh
-			naughty.notify({
-			   title = "Wallpaper Cache",
-			   text = "Invalid cache format, starting fresh",
-			   position = "bottom_middle",
-			   icon = beautiful.refreshed,
-			   icon_size = 64,
-			   width = notiWidth
-			})
-			if callback then callback() end
-			return
-		 end
-		 
-		 -- Version check
-		 if cache_data.version ~= M.cacheVersion then
-			-- Version mismatch, start fresh
-			naughty.notify({
-			   title = "Wallpaper Cache",
-			   text = "Cache version mismatch, starting fresh",
-			   position = "bottom_middle",
-			   icon = beautiful.refreshed,
-			   icon_size = 64,
-			   width = notiWidth
-			})
-			if callback then callback() end
-			return
-		 end
-		 
-		 -- Validate and load cache entries
-		 local validEntries = 0
-		 for filePath, entry in pairs(cache_data.cache) do
-			if type(filePath) == "string" and type(entry) == "table" and 
-			   entry.ratio and entry.width and entry.height then
-			   
-			   M.ratioCache[filePath] = entry
-			   validEntries = validEntries + 1
-			end
-		 end
-		 
-		 -- Limit cache size by keeping most recently accessed entries
-		 -- if validEntries > M.maxCacheEntries then
-		 --    -- Simple approach: clear cache and let it rebuild
-		 --    M.ratioCache = {}
-		 -- end
-		 
-		 -- Show successful load notification
-		 if validEntries > 0 then
-			naughty.notify({
-			   title = "Wallpaper Cache Loaded",
-			   text = "Loaded " .. validEntries .. " cached wallpaper ratios",
-			   position = "bottom_middle",
-			   icon = beautiful.refreshed,
-			   icon_size = 64,
-			   width = notiWidth,
-			   timeout = 3
-			})
-		 end
-		 
-		 if callback then callback() end
-   end)
-end
 
-M.saveRatioCache = function(notificationStyle)
-   -- Create cache data structure
-   local cache_data = {
-      version = M.cacheVersion,
-      last_updated = os.date("%Y-%m-%dT%H:%M:%S"),
-      cache = M.ratioCache
-   }
-   
-   -- Simple serialization that's safe for Lua
-   local function serializeTable(t, indent)
-      indent = indent or 0
-      local result = "{\n"
-      local indentStr = string.rep("  ", indent + 1)
-      
-      for k, v in pairs(t) do
-         result = result .. indentStr .. "[" .. string.format("%q", k) .. "] = "
-         
-         if type(v) == "table" then
-            result = result .. serializeTable(v, indent + 1)
-         elseif type(v) == "string" then
-            result = result .. string.format("%q", v)
-         else
-            result = result .. tostring(v)
-         end
-         result = result .. ",\n"
-      end
-      
-      result = result .. string.rep("  ", indent) .. "}"
-      return result
-   end
-   
-   local content = serializeTable(cache_data)
-   
-   -- Write to temporary file first for atomic operation
-   local temp_file_path = M.cacheFilePath .. ".tmp"
-   local file = io.open(temp_file_path, "w")
-   if not file then
-      -- Can't write cache, fail silently
-      return false
-   end
-   
-   file:write(content)
-   file:close()
-   
-   -- Atomic move from temp file to actual file
-   os.rename(temp_file_path, M.cacheFilePath)
-   
-   -- Show save notification based on style
-   if not M.suppressSaveNotification then
-      local cacheSize = 0
-      for _ in pairs(M.ratioCache) do
-         cacheSize = cacheSize + 1
-      end
-      
-      if notificationStyle == "auto" then
-         -- Auto-save: simple, short notification
-         naughty.notify({
-            title = "Cache Auto-saved",
-            text = cacheSize .. " entries",
-            position = "bottom_right",
-            icon = beautiful.refreshed,
-            icon_size = 32,
-            width = 200,
-            timeout = 1
-         })
-      elseif notificationStyle ~= "silent" then
-         -- Manual save: detailed notification (default)
-         naughty.notify({
-            title = "Wallpaper Cache Saved",
-            text = "Saved " .. cacheSize .. " cached wallpaper ratios",
-            position = "bottom_middle",
-            icon = beautiful.refreshed,
-            icon_size = 64,
-            width = notiWidth,
-            timeout = 2
-         })
-      end
-   end
-   
-   return true
-end
 
 M.getCachedRatio = function(imagePath)
    -- Try SQLite cache first
@@ -1356,25 +1149,27 @@ M.cacheRatio = function(imagePath, ratio, width, height)
       if M.sqliteConn then
          local success = M.cacheRatioSQLite(imagePath, ratio, width, height)
          if not success then
-            -- SQLite caching failed, show debug info
+            -- SQLite caching failed, write to journal as fallback
+            M.writeToJournal(imagePath, ratio, width, height)
             naughty.notify({
                title = "SQLite Cache Warning",
-               text = "Failed to cache: " .. (imagePath and imagePath:match("[^/]*$") or "unknown"),
+               text = "Failed to cache: " .. (imagePath and imagePath:match("[^/]*$") or "unknown") .. " (saved to journal)",
                position = "bottom_right",
                timeout = 2,
-               width = 300
+               width = 350
             })
          end
       else
-         -- SQLite not connected, try to reconnect
+         -- SQLite not connected, write to journal
+         M.writeToJournal(imagePath, ratio, width, height)
+
+         -- Try to reconnect for next time
          if not M.initSQLiteCache() then
-            -- Fall back to text mode for this session
-            M.useSQLiteCache = false
             naughty.notify({
                title = "SQLite Cache Error",
-               text = "SQLite unavailable, falling back to text cache",
+               text = "SQLite unavailable, using journal fallback",
                position = "bottom_middle",
-               timeout = 5,
+               timeout = 3,
                width = notiWidth
             })
          else
@@ -1390,110 +1185,19 @@ M.cacheRatio = function(imagePath, ratio, width, height)
       width = width,
       height = height,
    }
-
-   -- For text cache, periodically save (every 50 new entries)
-   if not M.useSQLiteCache then
-      local cache_size = 0
-      for _ in pairs(M.ratioCache) do
-         cache_size = cache_size + 1
-      end
-
-      if cache_size % 50 == 0 then
-         M.saveRatioCache("auto")
-      end
-   end
 end
 
 M.showCacheStatus = function()
-   if M.useSQLiteCache then
-      M.showCacheStatusSQLite()
-      return
-   end
-   local cacheSize = 0
-   local portraitCount = 0
-   local landscapeCount = 0
-   
-   for _, entry in pairs(M.ratioCache) do
-      cacheSize = cacheSize + 1
-      if entry.ratio == "portrait" then
-         portraitCount = portraitCount + 1
-      else
-         landscapeCount = landscapeCount + 1
-      end
-   end
-   
-   local statusText = "Cache entries: " .. cacheSize
-   if cacheSize > 0 then
-      statusText = statusText .. "\nPortrait: " .. portraitCount .. " | Landscape: " .. landscapeCount
-      statusText = statusText .. "\nCache file: " .. M.cacheFilePath
-      
-      -- Calculate approximate file size
-      local fileSize = "Unknown"
-      local file = io.open(M.cacheFilePath, "r")
-      if file then
-         local size = file:seek("end")
-         file:close()
-         if size then
-            if size < 1024 then
-               fileSize = size .. " bytes"
-            elseif size < 1024*1024 then
-               fileSize = string.format("%.1f KB", size / 1024)
-            else
-               fileSize = string.format("%.1f MB", size / (1024*1024))
-            end
-         end
-      end
-      statusText = statusText .. "\nFile size: " .. fileSize
-   else
-      statusText = statusText .. "\nNo cached entries"
-   end
-   
-   naughty.notify({
-      title = "Wallpaper Ratio Cache Status",
-      text = statusText,
-      position = "bottom_middle",
-      icon = beautiful.refreshed,
-      icon_size = 64,
-      width = notiWidth,
-      timeout = 8
-   })
+   M.showCacheStatusSQLite()
 end
 
 M.clearRatioCache = function()
-   if M.useSQLiteCache then
-      M.clearRatioCacheSQLite()
-      return
-   end
-   local oldSize = 0
-   for _ in pairs(M.ratioCache) do
-      oldSize = oldSize + 1
-   end
-   
-   -- Clear runtime cache
-   M.ratioCache = {}
-   
-   -- Remove cache file
-   os.remove(M.cacheFilePath)
-   
-   -- Show notification
-   naughty.notify({ 
-      title = "Wallpaper Cache Cleared",
-      text = "Cleared " .. oldSize .. " cached entries. Wallpaper ratios will be recalculated as needed.",
-      position = "bottom_middle",
-      icon = beautiful.refreshed, 
-      icon_size = 64,
-      width = notiWidth
-   })
+   M.clearRatioCacheSQLite()
 end
 
 M.saveRatioCacheOnExit = function()
-   if M.useSQLiteCache then
-      -- SQLite cache is auto-saved, just close connection
-      M.closeSQLiteCache()
-   else
-      -- Save text cache before AwesomeWM exits (silent)
-      M.saveRatioCache("silent")
-   end
+   -- SQLite cache is auto-saved, just close connection
+   M.closeSQLiteCache()
 end
 
 -- Helper function to check if we need predictive preloading
