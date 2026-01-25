@@ -31,13 +31,13 @@ local getMyScreenSymbol = function(s)
 
    -- Translated Letter, i.e. after Colemak mapping
    if x == 0 then return 'a' end
-   if x == 1080 then
-      return 'r' -- Main 32
+   if x < 3640 then
+      if y >= 1080 then
+          return 'r' -- Main 32
+      else
+	      return 'w' -- Top 32 (TV)
+      end
    end
-
-   if x == 1720 then
-	  return 'w' -- Top 32 (TV)
-   end  
 
    if x == 3640 then
       if y >= 1080 then
