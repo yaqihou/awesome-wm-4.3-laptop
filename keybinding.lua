@@ -53,6 +53,25 @@ local basicKeybindings = awful.util.table.join(
       function () awful.client.focus.byidx( 1) end,
       {description = "focus previous by index", group = "client"}
    ),
+   -- By Direction
+   awful.key(
+      { modkey,          }, "Left",
+      function () awful.client.focus.bydirection('left') end,
+      {description = "focus the left client", group = "client"}),
+   awful.key(
+      { modkey,          }, "Right",
+      function () awful.client.focus.bydirection('right') end,
+      {description = "focus the right client", group = "client"}),
+   awful.key(
+      { modkey,          }, "Up",
+      function () awful.client.focus.bydirection('up') end,
+      {description = "focus the up client", group = "client"}),
+   awful.key(
+      { modkey,          }, "Down",
+      function () awful.client.focus.bydirection('down') end,
+      {description = "focus the down client", group = "client"}),
+   -- [END] By Direction
+   --
    awful.key(
       { modkey,           }, "w",
       function () mymenu.main:show() end,
@@ -86,6 +105,36 @@ local basicKeybindings = awful.util.table.join(
          myutils.updateFocusWidget()
       end,
       {description = "focus the prev screen", group = "screen"}),
+   -- By Direction
+   awful.key(
+      { modkey, altkey   }, "Left",
+      function ()
+         awful.screen.focus_bydirection('left')
+         myutils.updateFocusWidget()
+      end,
+      {description = "focus the left screen", group = "screen"}),
+   awful.key(
+      { modkey, altkey   }, "Right",
+      function ()
+         awful.screen.focus_bydirection('right')
+         myutils.updateFocusWidget()
+      end,
+      {description = "focus the right screen", group = "screen"}),
+   awful.key(
+      { modkey, altkey   }, "Up",
+      function ()
+         awful.screen.focus_bydirection('up')
+         myutils.updateFocusWidget()
+      end,
+      {description = "focus the up screen", group = "screen"}),
+   awful.key(
+      { modkey, altkey   }, "Down",
+      function ()
+         awful.screen.focus_bydirection('down')
+         myutils.updateFocusWidget()
+      end,
+      {description = "focus the down screen", group = "screen"}),
+   -- [END] By Direction
    awful.key(
       { modkey,           }, "u",
       awful.client.urgent.jumpto,
