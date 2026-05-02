@@ -5,3 +5,7 @@
 /themes/holo/vert-wall.png*
 /themes/holo/wall*
 /themes/holo/*\\.png\\.*
+*sqlite*
+test/
+todo.md
+*.out

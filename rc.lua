@@ -41,18 +41,18 @@ end
 -- }}}
 
 -- {{{ Autostart windowless processes
-local function run_once(cmd_arr)
-    for _, cmd in ipairs(cmd_arr) do
-        findme = cmd
-        firstspace = cmd:find(" ")
-        if firstspace then
-            findme = cmd:sub(0, firstspace-1)
-        end
-        awful.spawn.with_shell(string.format("pgrep -u $USER -x %s > /dev/null || (%s)", findme, cmd))
-    end
-end
+-- local function run_once(cmd_arr)
+--     for _, cmd in ipairs(cmd_arr) do
+--         findme = cmd
+--         firstspace = cmd:find(" ")
+--         if firstspace then
+--             findme = cmd:sub(0, firstspace-1)
+--         end
+--         awful.spawn.with_shell(string.format("pgrep -u $USER -x %s > /dev/null || (%s)", findme, cmd))
+--     end
+-- end
 
-run_once({ "unclutter -root -idle 10" }) -- entries must be comma-separated
+-- run_once({ "unclutter -root -idle 10" }) -- entries must be comma-separated
 -- }}}
 
 -- {{{ Variable definitions
@@ -165,6 +165,7 @@ mymenu.main:add(
 
 -- Setup Wallpaper Accordingly
 -- Re-set wallpaper when a screen's geometry changes (e.g. different resolution)
+-- NOTE make sure this after beautiful
 wallpaper.init()
 screen.connect_signal("property::geometry", function(s)
     if beautiful.wallpaper then
@@ -236,6 +237,10 @@ awful.rules.rules = {
       callback = function(c)
          c:geometry({width=800, height=600})
       end
+    },
+
+    { rule = { class = "Google-chrome", above = true },
+      properties = { opacity = 0.8 },
     },
 
     { rule_any = { class = {"Google-chrome", "Nautilus"} },
